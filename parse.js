@@ -1620,6 +1620,10 @@ function parseBlocks(lines, refs, endsWithNl) {
   const doc = { t: 'doc', children: [] };
   const stack = [doc];
   let lastBlank = false;
+  // a blank line inside containers (e.g. a bare `>>` line) also separates
+  // blocks in the same list item, even though it is not a source-blank
+  // line and must not loosen across items (cm-320)
+  let blankSinceItemBlock = false;
 
   function addBlock(b) {
     const parent = stack[stack.length - 1];
@@ -1627,15 +1631,18 @@ function parseBlocks(lines, refs, endsWithNl) {
     // looseness: a blank line before this block inside a list item, or
     // before a new item in a list, makes the list loose. The flag is
     // consumed here: it means "a blank line since the last block was added".
-    if (lastBlank) {
-      if (parent.t === 'item' && parent.children.length > 1) {
+    // A container-blank line (bare `>>`) only loosens blocks added to the
+    // SAME item, never a new item (cm-320 vs cm-259).
+    if (parent.t === 'item' && parent.children.length > 1) {
+      if (lastBlank || blankSinceItemBlock) {
         const list = stack[stack.length - 2];
         if (list && list.t === 'list') list.tight = false;
-      } else if (parent.t === 'list' && b.t === 'item' && parent.children.length > 1) {
-        parent.tight = false;
       }
+    } else if (parent.t === 'list' && b.t === 'item' && parent.children.length > 1) {
+      if (lastBlank) parent.tight = false;
     }
     lastBlank = false;
+    blankSinceItemBlock = false;
     return b;
   }
 
@@ -1799,7 +1806,14 @@ function parseBlocks(lines, refs, endsWithNl) {
       // a lazy continuation line has 4 columns of leading indent stripped
       // (the indented-code threshold); fewer than 4 columns are kept
       if (curSpaces(cur) >= 4) curAdvance(cur, 4);
-      top.lines.push(curRestExpanded(cur));
+      let line = curRestExpanded(cur);
+      // a lazy setext underline inside a blockquote is paragraph text,
+      // not a heading underline, and it is indented 4 spaces so it
+      // cannot be mistaken for one (in a list item it stays as-is)
+      if (setextLevel(line) === 1 && stack.some((b) => b.t === 'quote')) {
+        line = '    ' + line;
+      }
+      top.lines.push(line);
       li++;
       continue;
     }
@@ -1843,6 +1857,10 @@ function parseBlocks(lines, refs, endsWithNl) {
             done = true;
             break;
           }
+          // a container-blank line ends the paragraph: it separates the
+          // next block in the same item (cm-259), even though it is not
+          // a source-blank line
+          blankSinceItemBlock = true;
           stack.pop();
           finalize(top);
         } else if (top.t === 'html') {
@@ -1852,6 +1870,7 @@ function parseBlocks(lines, refs, endsWithNl) {
           // content until their end tag.
           if (top.type === 6 || top.type === 7) {
             top.stripNl = true;
+            blankSinceItemBlock = true;
             stack.pop();
             finalize(top);
           } else {
