@@ -1251,13 +1251,13 @@ function tryParseDef(text, pos) {
   let sp = 0;
   while (i < n && text[i] === ' ' && sp < 3) { i++; sp++; }
   if (i >= n || text[i] !== '[') return null;
-  // label: balanced brackets, no line breaks, <= 999 chars
+  // label: balanced brackets, line breaks allowed (they collapse to
+  // spaces when the label is normalised), <= 999 chars
   let j = i + 1;
   let depth = 1;
   let label = '';
   while (j < n && depth > 0) {
     const c = text[j];
-    if (c === '\n') return null;
     if (c === '\\' && j + 1 < n && isPunct(text.charCodeAt(j + 1))) {
       label += text[j + 1];
       j += 2;
@@ -1281,37 +1281,50 @@ function tryParseDef(text, pos) {
   const d = parseDest(text, j);
   if (!d) return null;
   const dest = d[0];
-  j = d[1];
+  const destEnd = d[1];
+  // Optional title after the destination. A title must be preceded by
+  // whitespace (or a newline). If the title is on a later line and is
+  // invalid (or followed by junk), the title is dropped and the
+  // definition ends at the end of the destination's line. If the title
+  // is on the same line as the destination and is invalid (or followed
+  // by junk), the whole definition is invalid.
   let title = null;
-  // optional title: skip ws, maybe one newline, then title. A title must
-  // be preceded by whitespace (or a newline); a title glued to the
-  // destination makes the whole definition invalid.
-  let j2 = skipInlineWs(text, j);
+  let end = null;
+  let j2 = skipInlineWs(text, destEnd);
   let hasNl = false;
-  let sawWs = j2 > j;
-  if (j2 < n && text[j2] === '\n') { hasNl = true; j2++; j2 = skipInlineWs(text, j2); sawWs = true; }
-  if (j2 < n && (text[j2] === '"' || text[j2] === "'" || text[j2] === '(')) {
-    if (!sawWs) return null; // title glued to the destination
+  if (j2 < n && text[j2] === '\n') { hasNl = true; j2++; j2 = skipInlineWs(text, j2); }
+  if (j2 > destEnd && j2 < n && (text[j2] === '"' || text[j2] === "'" || text[j2] === '(')) {
     const t = parseTitle(text, j2);
-    if (!t) {
-      // a title that fails to parse: the def is invalid
-      return null;
+    if (t) {
+      const after = skipInlineWs(text, t[1]);
+      if (after >= n || text[after] === '\n') {
+        title = t[0];
+        end = after;
+        if (end < n) end++; // consume the newline
+      } else if (hasNl) {
+        // title on a later line, followed by junk: drop the title
+        end = null;
+      } else {
+        return null; // title on the same line, followed by junk
+      }
+    } else if (!hasNl) {
+      return null; // title on the same line that does not parse
     }
-    title = t[0];
-    j = t[1];
-  } else {
-    j = j2;
-    if (hasNl) {
-      // we consumed a newline looking for a title that isn't there; back up:
-      // the def ends at the destination's line end
-      j = skipInlineWs(text, d[1]);
+    // title on a later line that does not parse: drop it (end stays null)
+  }
+  if (end === null) {
+    // no (valid) title: the definition ends at the end of the
+    // destination's line (only spaces/tabs may follow the destination)
+    const e = skipInlineWs(text, destEnd);
+    if (e < n && text[e] === '\n') {
+      end = e + 1;
+    } else if (e >= n) {
+      end = e;
+    } else {
+      return null; // junk after the destination on its line
     }
   }
-  // after title/dest: only spaces/tabs then EOL (or end of text)
-  j = skipInlineWs(text, j);
-  if (j < n && text[j] !== '\n') return null;
-  if (j < n) j++; // consume the newline
-  return { label, dest, title, end: j };
+  return { label, dest, title, end };
 }
 
 function skipInlineWs(text, i) {
@@ -1379,6 +1392,28 @@ function delimiterRow(line) {
 }
 
 // ---------------------------------------------------------------- block parsing
+
+// Does the line (from a block-start position) begin a block that would
+// interrupt a paragraph? Setext underlines, ATX/fenced-code/HTML
+// (types 1-6)/thematic-break starts, blockquotes, and non-empty list
+// items (ordered lists only from 1) all interrupt. Used both for the
+// paragraph-interruption check and for lazy-continuation decisions:
+// a line that interrupts a paragraph is never a lazy continuation.
+function interruptsPara(s) {
+  if (setextLevel(s)) return true;
+  if (atxHeading(s) || fenceStart(s) || isThematicBreak(s)) return true;
+  const html = htmlBlockStart(s);
+  if (html && html.type !== 7) return true;
+  if (s.trimStart().startsWith('>')) return true;
+  const lm = listMarker(s);
+  if (lm) {
+    const after = s.slice(lm.indent + lm.markerLen);
+    if (after.trim() !== '') {
+      if (!lm.ordered || lm.start === 1) return true;
+    }
+  }
+  return false;
+}
 
 function parseBlocks(lines, refs) {
   const doc = { t: 'doc', children: [] };
@@ -1487,7 +1522,10 @@ function parseBlocks(lines, refs) {
           continue;
         }
         curRestore(cur, snap);
-        if (stack[stack.length - 1].t === 'para' && !curBlank(cur)) lazy = true;
+        // a line that would interrupt a paragraph (setext, ATX, fence,
+        // thematic break, HTML, blockquote, interrupting list) is never
+        // a lazy continuation: the container closes instead
+        if (stack[stack.length - 1].t === 'para' && !curBlank(cur) && !interruptsPara(curRest(cur))) lazy = true;
         break;
       }
       if (b.t === 'item') {
@@ -1502,13 +1540,16 @@ function parseBlocks(lines, refs) {
           j++;
           continue;
         }
-        if (stack[stack.length - 1].t === 'para' && !curBlank(cur)) lazy = true;
+        if (stack[stack.length - 1].t === 'para' && !curBlank(cur) && !interruptsPara(curRest(cur))) lazy = true;
         break;
       }
       break;
     }
     if (lazy) {
       const top = stack[stack.length - 1];
+      // a lazy continuation line has 4 columns of leading indent stripped
+      // (the indented-code threshold); fewer than 4 columns are kept
+      if (curSpaces(cur) >= 4) curAdvance(cur, 4);
       top.lines.push(curRestExpanded(cur));
       li++;
       continue;
@@ -1553,37 +1594,26 @@ function parseBlocks(lines, refs) {
       if (top.t === 'para') {
         // setext underline? Convert the paragraph node in place (it is
         // already in its parent's children; do not leave a stale copy).
+        // A paragraph made only of link reference definitions has no
+        // content to be a heading: the underline is then an ordinary
+        // paragraph line instead.
         const lvl = setextLevel(curRest(cur));
         if (lvl) {
           const text = stripDefs(top.lines.join('\n'), refs);
-          top.t = 'heading';
-          top.level = lvl;
-          top.content = text;
-          delete top.lines;
-          stack.pop();
-          done = true;
-          break;
+          if (text !== '') {
+            top.t = 'heading';
+            top.level = lvl;
+            top.content = text;
+            delete top.lines;
+            stack.pop();
+            done = true;
+            break;
+          }
+          // else: fall through and add this line to the paragraph
         }
         // interrupting block starts?
         const rest = curRest(cur);
-        const atx = atxHeading(rest);
-        const fence = fenceStart(rest);
-        const html = htmlBlockStart(rest);
-        const hr = isThematicBreak(rest);
-        const lm = listMarker(rest);
-        let interrupts = false;
-        if (atx || fence || hr) interrupts = true;
-        else if (html && html.type !== 7) interrupts = true;
-        else if (rest.trimStart().startsWith('>')) interrupts = true;
-        else if (lm) {
-          // a list interrupts a paragraph when its first item is not empty;
-          // an ordered list also needs start == 1
-          const after = rest.slice(lm.indent + lm.markerLen);
-          if (after.trim() !== '') {
-            if (!lm.ordered || lm.start === 1) interrupts = true;
-          }
-        }
-        if (interrupts) {
+        if (interruptsPara(rest)) {
           stack.pop();
           finalize(top);
           continue; // re-process the line as a new block
