@@ -2013,9 +2013,10 @@ function parseBlocks(lines, refs, endsWithNl) {
         top.content += line + '\n';
         if (top.endTag && line.toLowerCase().includes(top.endTag.toLowerCase())) {
           // the trailing newline is stripped only if the next line is a
-          // real blank line; no next line means end-of-input (keep it)
+          // truly empty line; a whitespace-only line (e.g. a tab) keeps
+          // it (marked distinguishes the two)
           let strip = false;
-          if (li + 1 < lines.length && /^[ \t]*$/.test(lines[li + 1])) strip = true;
+          if (li + 1 < lines.length && lines[li + 1] === '') strip = true;
           top.stripNl = strip;
           stack.pop();
           finalize(top);
