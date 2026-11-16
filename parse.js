@@ -1700,6 +1700,12 @@ function parseBlocks(lines, refs, endsWithNl) {
   // blocks in the same list item, even though it is not a source-blank
   // line and must not loosen across items (cm-320)
   let blankSinceItemBlock = false;
+  // a container-blank line that pops a paragraph which is a DIRECT child
+  // of a list item separates two items of that list, so a following new
+  // item loosens it (doc-15: `>` blank lines between `- [x]` items in a
+  // blockquote). A para nested deeper (inside a quote in the item, cm-320)
+  // does not loosen a new item.
+  let blankSinceItemPara = false;
 
   function addBlock(b) {
     const parent = stack[stack.length - 1];
@@ -1715,10 +1721,11 @@ function parseBlocks(lines, refs, endsWithNl) {
         if (list && list.t === 'list') list.tight = false;
       }
     } else if (parent.t === 'list' && b.t === 'item' && parent.children.length > 1) {
-      if (lastBlank) parent.tight = false;
+      if (lastBlank || blankSinceItemPara) parent.tight = false;
     }
     lastBlank = false;
     blankSinceItemBlock = false;
+    blankSinceItemPara = false;
     return b;
   }
 
@@ -1774,9 +1781,14 @@ function parseBlocks(lines, refs, endsWithNl) {
     if (b.t === 'list') b.closed = true;
   }
 
-  function closeTo(depth, isFinal) {
+  function closeTo(depth, isFinal, containerBlank) {
     while (stack.length - 1 > depth) {
       const b = stack.pop();
+      // a container-blank line (e.g. a bare `>` line) that closes a
+      // paragraph which is a direct child of a list item separates two
+      // items of that list (doc-15); a para nested deeper (cm-320) does
+      // not. The parent is the new top after the pop.
+      if (containerBlank && b.t === 'para' && stack.length > 0 && stack[stack.length - 1].t === 'item') blankSinceItemPara = true;
       // an HTML block cut off by its parent container ending (blockquote
       // or list item) loses its trailing newline; at EOF it keeps it
       if (!isFinal && b.t === 'html' && (b.type === 6 || b.type === 7)) b.stripNl = true;
@@ -1926,7 +1938,7 @@ function parseBlocks(lines, refs, endsWithNl) {
         depth = stack.length - 1;
       }
     }
-    closeTo(depth);
+    closeTo(depth, false, curBlank(cur) && !srcBlank);
 
     // ---- Phase 2: consume this line (may loop for new containers) ----
     let done = false;
@@ -1984,6 +1996,9 @@ function parseBlocks(lines, refs, endsWithNl) {
           // next block in the same item (cm-259), even though it is not
           // a source-blank line
           blankSinceItemBlock = true;
+          // if this paragraph is a direct child of a list item, the
+          // blank also separates two items of that list (doc-15)
+          if (stack.length >= 2 && stack[stack.length - 2].t === 'item') blankSinceItemPara = true;
           stack.pop();
           finalize(top);
         } else if (top.t === 'html') {
@@ -2237,8 +2252,9 @@ function parseBlocks(lines, refs, endsWithNl) {
             addBlock(list);
           }
           const item = { t: 'item', children: [], indent: itemIndent };
-          if (lastBlank && list.children.length > 0) list.tight = false;
+          if ((lastBlank || blankSinceItemPara) && list.children.length > 0) list.tight = false;
           lastBlank = false;
+          blankSinceItemPara = false;
           list.children.push(item);
           // push the list only if it is not already the stack top
           // (reusing the open list); the item is always pushed
