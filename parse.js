@@ -1802,6 +1802,15 @@ function parseBlocks(lines, refs, endsWithNl) {
           break;
         }
         if (top.t === 'para') {
+          // a line that leaves spaces after its container markers
+          // (e.g. `>  ` leaves one space) is a continuation line whose
+          // content is those spaces, not a blank line; only a line with
+          // nothing left after the markers ends the paragraph
+          if (curRest(cur) !== '' && cur.col > 0) {
+            top.lines.push(curRestExpanded(cur));
+            done = true;
+            break;
+          }
           stack.pop();
           finalize(top);
         } else if (top.t === 'html') {
