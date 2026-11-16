@@ -561,6 +561,7 @@ function plainText(nodes) {
   for (const nd of nodes) {
     if (nd.t === 'txt') out += nd.s;
     else if (nd.t === 'code') out += nd.s;
+    else if (nd.t === 'delim') out += nd.ch.repeat(nd.n);
     else if (nd.t === 'em') out += plainText(nd.kids);
     else if (nd.t === 'br') out += ' ';
     else if (nd.t === 'aStart' || nd.t === 'aEnd') { /* drop */ }
@@ -615,10 +616,15 @@ function scanInline(src, refs) {
       // Reference link: [label], [] (collapsed), or shortcut.
       let label = null;
       if (after < n && src.charCodeAt(after) === CODE_LBRACKET) {
-        // parse [label] with balanced brackets
+        // parse [label] with balanced brackets; a backslash escape
+        // (\[ or \]) is a literal character, not a bracket
         let j = after + 1;
         let depth = 1;
         while (j < n && depth > 0) {
+          if (src.charCodeAt(j) === CODE_BACKSLASH && j + 1 < n && isPunct(src.charCodeAt(j + 1))) {
+            j += 2;
+            continue;
+          }
           if (src.charCodeAt(j) === CODE_LBRACKET) depth++;
           else if (src.charCodeAt(j) === CODE_RBRACKET) depth--;
           j++;
@@ -1386,6 +1392,8 @@ function tryParseDef(text, pos) {
     j++;
   }
   if (depth !== 0 || label === '' || label.length > 999) return null;
+  // a label that normalises to empty (only whitespace) is not a definition
+  if (normLabel(label) === '') return null;
   j++; // past ']'
   if (j >= n || text[j] !== ':') return null;
   j++;
