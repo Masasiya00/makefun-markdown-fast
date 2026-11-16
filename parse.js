@@ -1220,17 +1220,17 @@ function renderKids(kids) {
 }
 
 // Fast path: inline text with no markup at all. Returns the HTML, or null
-// when the text needs the full parser.
+// when the text needs the full parser. Single pass: checks for markup
+// chars, extended autolinks (www. / @ / ://), and 2-space hard breaks.
 function fastInline(src) {
-  // No backslash, backtick, <, [, ], !, *, _, ~, & and no 2-space hard break.
-  // Also bail when an extended autolink may be present (www., an email
-  // with @, or a scheme URL with ://): those are only detected by the
-  // full scan, so the fast path would silently drop them.
-  if (src.includes('www.') || src.includes('@') || src.includes('://')) return null;
   for (let i = 0; i < src.length; i++) {
     const c = src.charCodeAt(i);
     if (c === 92 || c === 96 || c === 60 || c === 91 || c === 93 || c === 33 ||
       c === 42 || c === 95 || c === 126 || c === 38) return null;
+    // extended autolink triggers: www. / @ / ://
+    if (c === 119 && src.charCodeAt(i + 1) === 119 && src.charCodeAt(i + 2) === 119 && src.charCodeAt(i + 3) === 46) return null;
+    if (c === 64) return null;
+    if (c === 58 && src.charCodeAt(i + 1) === 47 && src.charCodeAt(i + 2) === 47) return null;
     if (c === 32 && src.charCodeAt(i + 1) === 32) {
       // two spaces: only a hard break if a newline follows later on this run
       let j = i;
