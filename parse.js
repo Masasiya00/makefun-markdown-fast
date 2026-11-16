@@ -441,6 +441,53 @@ function matchWww(s, i) {
   return { href: 'http://' + url, text: url, end: i + url.length };
 }
 
+// Match a GFM extended autolink with a scheme (http://, https://,
+// mailto:, xmpp:, ...) at s[i]. Returns {href, text, end} or null.
+function matchScheme(s, i) {
+  const n = s.length;
+  let k = i;
+  if (k >= n || !isAlpha(s.charCodeAt(k))) return null;
+  k++;
+  while (k < n && (isAlnum(s.charCodeAt(k)) || s[k] === '+' || s[k] === '-' || s[k] === '.')) k++;
+  if (k - i < 2 || k - i > 32 || k >= n || s.charCodeAt(k) !== 58) return null; // ':'
+  const scheme = s.slice(i, k);
+  let j = k + 1;
+  // hierarchical URL (http://...): domain + full path
+  if (s.startsWith('//', j)) {
+    let end = j;
+    while (end < n) {
+      const c = s.charCodeAt(end);
+      if (c === CODE_SPACE || c === CODE_TAB || c === CODE_NL || c === CODE_LT) break;
+      end++;
+    }
+    let url = s.slice(i, end);
+    url = trimAutolink(url);
+    if (url === '' || !url.includes('://')) return null;
+    return { href: url, text: url, end: i + url.length };
+  }
+  // opaque URL (mailto:, xmpp:, ...): an email-like address, optionally
+  // followed by one /resource segment (no further /)
+  const e = matchEmailAt(s, j);
+  if (!e) return null;
+  let url = scheme + ':' + e.text;
+  let end = j + e.text.length;
+  if (end < n && s.charCodeAt(end) === 47) { // '/'
+    let seg = end + 1;
+    while (seg < n) {
+      const c = s.charCodeAt(seg);
+      if (c === CODE_SPACE || c === CODE_TAB || c === CODE_NL || c === CODE_LT || c === 47) break;
+      seg++;
+    }
+    if (seg > end + 1) {
+      url += s.slice(end, seg);
+      end = seg;
+    }
+  }
+  url = trimAutolink(url);
+  if (url === '') return null;
+  return { href: url, text: url, end: i + url.length };
+}
+
 function matchEmailAt(s, i) {
   const n = s.length;
   // local part
@@ -452,10 +499,13 @@ function matchEmailAt(s, i) {
   let k = j + 1;
   const dstart = k;
   while (k < n && (isAlnum(s.charCodeAt(k)) || s.charCodeAt(k) === 45 || s.charCodeAt(k) === 46)) k++;
-  let domain = s.slice(dstart, k).replace(/[.-]+$/, '');
+  // only a trailing '.' is punctuation after the address; a trailing '-'
+  // makes the domain label invalid (it is a domain character, not a
+  // separator), so it is not trimmed
+  let domain = s.slice(dstart, k).replace(/\.+$/, '');
   if (!domain.includes('.')) return null;
   const tld = domain.slice(domain.lastIndexOf('.') + 1);
-  if (tld.length < 2 || !/^[A-Za-z]+$/.test(tld)) return null;
+  if (tld.length < 1 || !/^[A-Za-z]+$/.test(tld)) return null;
   const labels = domain.split('.');
   for (const lab of labels) {
     if (lab === '' || lab.startsWith('-') || lab.endsWith('-')) return null;
@@ -463,6 +513,10 @@ function matchEmailAt(s, i) {
   let email = local + '@' + domain;
   email = trimAutolink(email);
   if (email === '' || !email.includes('@')) return null;
+  // a word character immediately after the address means it is part of a
+  // larger token (e.g. a.b@a.b_), not a standalone autolink
+  const afterIdx = i + email.length;
+  if (afterIdx < n && isWord(s.charCodeAt(afterIdx))) return null;
   return { href: 'mailto:' + email, text: email, end: i + email.length };
 }
 
@@ -784,6 +838,18 @@ function scanInline(src, refs) {
         continue;
       }
     }
+    // --- extended autolinks: scheme (http://, mailto:, xmpp:, ...) ---
+    if (isAlpha(c) && !isWord(prevChar)) {
+      const sc = matchScheme(src, i);
+      if (sc) {
+        push(mkNode('aStart', { href: sc.href, title: null }));
+        push(mkNode('txt', { s: sc.text }));
+        push(mkNode('aEnd'));
+        i = sc.end;
+        prevChar = src.charCodeAt(i - 1);
+        continue;
+      }
+    }
     // --- extended autolinks: email ---
     if (c !== CODE_SPACE && c !== CODE_TAB && c !== CODE_NL && !isWord(prevChar)) {
       const e = matchEmailAt(src, i);
@@ -828,6 +894,9 @@ function scanInline(src, refs) {
       continue;
     }
     // --- plain text run ---
+    // Stop at a word start (a word char preceded by a non-word char): an
+    // extended autolink (www., email, scheme like http://) can only start
+    // there, and the run would otherwise swallow it as plain text.
     let j = i;
     while (j < n) {
       const d = src.charCodeAt(j);
@@ -837,6 +906,8 @@ function scanInline(src, refs) {
       // a www. autolink can start here: stop the run so the autolink
       // branch gets a chance (otherwise the run swallows it as text)
       if (d === 119 && src.startsWith('www.', j)) break;
+      // word start: the previous char is not a word char, this one is
+      if (j > i && isWord(d) && !isWord(src.charCodeAt(j - 1))) break;
       j++;
     }
     if (j === i) j = i + 1; // a single char that is special only in context (e.g. '!')
@@ -1042,10 +1113,10 @@ function renderKids(kids) {
 // when the text needs the full parser.
 function fastInline(src) {
   // No backslash, backtick, <, [, ], !, *, _, ~, & and no 2-space hard break.
-  // Also bail when an extended autolink may be present (www. or an email
-  // with @): those are only detected by the full scan, so the fast path
-  // would silently drop them.
-  if (src.includes('www.') || src.includes('@')) return null;
+  // Also bail when an extended autolink may be present (www., an email
+  // with @, or a scheme URL with ://): those are only detected by the
+  // full scan, so the fast path would silently drop them.
+  if (src.includes('www.') || src.includes('@') || src.includes('://')) return null;
   for (let i = 0; i < src.length; i++) {
     const c = src.charCodeAt(i);
     if (c === 92 || c === 96 || c === 60 || c === 91 || c === 93 || c === 33 ||
