@@ -94,9 +94,12 @@ function numericRef(s, i) {
 
 // Normalise a link label: collapse whitespace runs to one space, trim, lowercase.
 function normLabel(s) {
-  // unescape backslash escapes, collapse whitespace, fold case.
+  // Collapse whitespace, fold case. Backslash escapes are resolved ONLY
+  // for [ ] and \ (the characters structural to label parsing): a label
+  // [foo\!] does NOT match a def [foo!] (the \! stays literal), but
+  // [Foo*bar\]] DOES match [Foo*bar]] (the \] is the label's own ]).
   // Unicode case folding maps ß and ẞ to ss (so [ẞ] matches [SS]).
-  return s.replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/\s+/g, ' ').trim().toLowerCase().replace(/ß/g, 'ss');
+  return s.replace(/\\([\\\[\]])/g, '$1').replace(/\s+/g, ' ').trim().toLowerCase().replace(/ß/g, 'ss');
 }
 
 // Encode a link destination the way marked does: encodeURI-style, but a
@@ -575,15 +578,19 @@ function trimAutolink(url) {
   return url;
 }
 
-// Plain-text rendering of a node range (for image alt text): text and code
-// content kept, emphasis markers and link structure dropped, newlines -> space.
-function plainText(nodes) {
+// Plain-text rendering of a node range (for image alt text and link
+// labels): text and code content kept, emphasis markers and link
+// structure dropped, newlines -> space. Delimiter nodes are kept as
+// their literal chars for a link label (so `[foo *bar*]` matches its
+// refdef), but dropped for an image alt (the alt is the plain text
+// `foo bar`, not `foo *bar*`).
+function plainText(nodes, dropDelim) {
   let out = '';
   for (const nd of nodes) {
     if (nd.t === 'txt') out += nd.s;
     else if (nd.t === 'code') out += nd.s;
-    else if (nd.t === 'delim') out += nd.ch.repeat(nd.n);
-    else if (nd.t === 'em') out += plainText(nd.kids);
+    else if (nd.t === 'delim') { if (!dropDelim) out += nd.ch.repeat(nd.n); }
+    else if (nd.t === 'em') out += plainText(nd.kids, dropDelim);
     else if (nd.t === 'br') out += ' ';
     else if (nd.t === 'aStart' || nd.t === 'aEnd') { /* drop */ }
     else if (nd.t === 'img') out += nd.alt;
@@ -631,10 +638,13 @@ function scanInline(src, refs) {
     const after = i + 1;
     if (after < n && src.charCodeAt(after) === 40) { // '(' inline link
       const t = parseInlineLinkTail(src, after);
-      if (!t) return null;
-      dest = t.dest; title = t.title; end = t.end;
-    } else {
-      // Reference link: [label], [] (collapsed), or shortcut.
+      if (t) { dest = t.dest; title = t.title; end = t.end; }
+    }
+    if (dest === null) {
+      // Reference link: [label], [] (collapsed), or shortcut. Reached
+      // when there is no '(' after the ], or when the inline tail is
+      // not a valid link (e.g. [foo](not a link) falls back to the
+      // [foo] reference, leaving (not a link) as literal text).
       let label = null;
       if (after < n && src.charCodeAt(after) === CODE_LBRACKET) {
         // parse [label] with balanced brackets; a backslash escape
@@ -656,19 +666,25 @@ function scanInline(src, refs) {
         if (label === '') label = null; // collapsed: use link text
       }
       if (label === null) {
-        // collapsed or shortcut: label is the link text
-        label = plainText(rangeNodes(br.next, tail));
+        // collapsed or shortcut: the label is the link text, taken
+        // from the raw source (not the processed nodes) so backslash
+        // escapes stay literal for matching: [foo\!] does not match
+        // a def [foo!], while [foo *bar*] still matches [foo *bar*]
+        label = src.slice(br.pos + 1, i);
       }
       const ref = refs.get(normLabel(label));
       if (!ref) return null;
       dest = ref.dest; title = ref.title;
       if (end === -1) end = i + 1;
     }
-    // A link cannot contain a link, but it CAN contain an image.
-    let nd = br.next;
-    while (nd) {
-      if (nd.t === 'aStart' || nd.t === 'aEnd') return null;
-      nd = nd.next;
+    // A link cannot contain a link, but it CAN contain an image. An
+    // image CAN contain a link (the link's text becomes part of the alt).
+    if (!br.img) {
+      let nd = br.next;
+      while (nd) {
+        if (nd.t === 'aStart' || nd.t === 'aEnd') return null;
+        nd = nd.next;
+      }
     }
     // Remove this bracket and any brackets opened after it from the stack.
     const brIdx = brackets.indexOf(br);
@@ -677,7 +693,7 @@ function scanInline(src, refs) {
       // Image: alt text from the bracket's nodes, then replace the whole
       // range [bang, br .. tail] with a single img node.
       const inner = rangeNodes(br.next, tail);
-      const alt = plainText(inner);
+      const alt = plainText(inner, true);
       // remove delimiter nodes inside the image from the delimiter stack
       for (const x of inner) {
         if (x.t === 'delim') {
@@ -794,6 +810,7 @@ function scanInline(src, refs) {
       br.bracket = true;
       br.img = true;
       br.bang = bang;
+      br.pos = i + 1;
       pushNode(br);
       brackets.push(br);
       i += 2;
@@ -805,6 +822,7 @@ function scanInline(src, refs) {
       const br = mkNode('txt', { s: '[' });
       br.bracket = true;
       br.img = false;
+      br.pos = i;
       pushNode(br);
       brackets.push(br);
       i++;
@@ -819,6 +837,10 @@ function scanInline(src, refs) {
         prevChar = CODE_RBRACKET;
         continue;
       }
+      // No link formed: this ] still closes the innermost [ (it is now
+      // literal text, and a later ] belongs to an outer bracket, not
+      // this one)
+      if (brackets.length > 0) brackets.pop();
       appendText(']');
       i++;
       prevChar = CODE_RBRACKET;
