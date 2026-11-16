@@ -136,18 +136,22 @@ function mkNode(t, o) {
   return n;
 }
 
-// Unicode punctuation test (for flanking rules): ASCII punct, else \p{P}.
-const UNICODE_PUNCT = /\p{P}/u;
+// Unicode punctuation test (for flanking rules): ASCII punct, else \p{P} or
+// \p{S}. The spec counts Unicode symbols (currency like $ £ €, math, etc.)
+// as punctuation for emphasis flanking.
+const UNICODE_PUNCT = /[\p{P}\p{S}]/u;
 function isPunctCode(cp) {
   if (cp < 128) return isPunct(cp);
   return UNICODE_PUNCT.test(String.fromCodePoint(cp));
 }
 function charKindAt(s, i) {
-  // 0 = whitespace/start/end, 1 = punctuation, 2 = other
+  // 0 = whitespace/start/end, 1 = punctuation, 2 = other.
+  // Whitespace is Unicode whitespace (incl. nbsp U+00A0), not just ASCII.
   if (i < 0 || i >= s.length) return 0;
-  const c = s.charCodeAt(i);
-  if (c === 32 || c === 9 || c === 10 || c === 13) return 0;
-  return isPunctCode(c) ? 1 : 2;
+  const cp = s.codePointAt(i);
+  if (cp === 32 || cp === 9 || cp === 10 || cp === 13) return 0;
+  if (/\s/.test(String.fromCodePoint(cp))) return 0;
+  return isPunctCode(cp) ? 1 : 2;
 }
 
 // A code span: opening run of n backticks at s[i]. Returns [content, endIndex]
@@ -864,8 +868,10 @@ function processEmphasis(head, delims) {
     const b = bottom[current.ch] || null;
     let opener = current.dPrev;
     let found = null;
+    let sawOpener = false;
     while (opener && opener !== b) {
       if (opener.ch === current.ch && opener.open) {
+        sawOpener = true;
         const odd = (opener.close || current.open) &&
           ((opener.n + current.n) % 3 === 0) &&
           (opener.n % 3 !== 0 || current.n % 3 !== 0);
@@ -888,8 +894,9 @@ function processEmphasis(head, delims) {
         nd = nd.next;
       }
       if (aDepth !== 0) {
-        // emphasis would straddle a link boundary: do not form here
-        if (current.open) bottom[current.ch] = current.dPrev;
+        // emphasis would straddle a link boundary: do not form here.
+        // Do not move the bottom marker: the opener may still pair with
+        // a later closer past the link.
         current = current.dNext;
         continue;
       }
@@ -911,8 +918,9 @@ function processEmphasis(head, delims) {
       }
       // closer: keep it (reduced) or remove it
       current.n -= use;
+      const closerLeft = current.n > 0;
       const nextDelim = current.dNext;
-      if (current.n > 0) {
+      if (closerLeft) {
         em.next = current;
         current.prev = em;
         if (after) after.prev = current;
@@ -922,9 +930,16 @@ function processEmphasis(head, delims) {
         if (after) after.prev = em;
         dropDelim(current, delims, bottom);
       }
-      current = nextDelim;
+      // A closer that still has delimiters left must be re-examined: its
+      // remaining run can close another (outer) opener, e.g. the last *
+      // of *** after a ** strong. Advancing past it loses that pairing.
+      current = closerLeft ? current : nextDelim;
     } else {
-      if (current.open) bottom[current.ch] = current.dPrev;
+      // No opener for this closer. Only move the bottom marker when no
+      // candidate opener was seen at all: an opener rejected by the rule
+      // of 3 for THIS closer (its n differs) may still pair with a later
+      // closer, so it must stay reachable.
+      if (current.open && !sawOpener) bottom[current.ch] = current.dPrev;
       current = current.dNext;
     }
   }
