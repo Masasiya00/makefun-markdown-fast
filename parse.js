@@ -94,14 +94,27 @@ function numericRef(s, i) {
 
 // Normalise a link label: collapse whitespace runs to one space, trim, lowercase.
 function normLabel(s) {
-  // unescape backslash escapes, collapse whitespace, fold case
-  return s.replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/\s+/g, ' ').trim().toLowerCase();
+  // unescape backslash escapes, collapse whitespace, fold case.
+  // Unicode case folding maps ß and ẞ to ss (so [ẞ] matches [SS]).
+  return s.replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/\s+/g, ' ').trim().toLowerCase().replace(/ß/g, 'ss');
 }
 
-// Encode a link destination the way marked does (encodeURI, then the text
-// escape rule applies to & when rendered).
+// Encode a link destination the way marked does: encodeURI-style, but a
+// valid percent-encoding (% followed by two hex digits) is preserved, not
+// re-encoded to %25.
 function encodeDest(dest) {
-  return encodeURI(dest);
+  let out = '';
+  for (let i = 0; i < dest.length; i++) {
+    const c = dest[i];
+    if (c === '%' && i + 2 < dest.length &&
+        /^[0-9a-fA-F]$/.test(dest[i + 1]) && /^[0-9a-fA-F]$/.test(dest[i + 2])) {
+      out += dest.slice(i, i + 3);
+      i += 2;
+      continue;
+    }
+    out += encodeURI(c);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- inline parser
@@ -183,6 +196,8 @@ function parseDest(s, i) {
     return null;
   }
   // Bare destination: no spaces/control chars, balanced parens.
+  // An empty destination () is valid: href="".
+  if (s.charCodeAt(i) === 41) return ['', i];
   let j = i;
   let depth = 0;
   let dest = '';
@@ -564,10 +579,10 @@ function scanInline(src, refs) {
       dest = ref.dest; title = ref.title;
       if (end === -1) end = i + 1;
     }
-    // A link cannot contain a link.
+    // A link cannot contain a link, but it CAN contain an image.
     let nd = br.next;
     while (nd) {
-      if (nd.t === 'aStart' || nd.t === 'aEnd' || nd.t === 'img') return null;
+      if (nd.t === 'aStart' || nd.t === 'aEnd') return null;
       nd = nd.next;
     }
     // Remove this bracket and any brackets opened after it from the stack.
@@ -1259,7 +1274,9 @@ function tryParseDef(text, pos) {
   while (i < n && text[i] === ' ' && sp < 3) { i++; sp++; }
   if (i >= n || text[i] !== '[') return null;
   // label: balanced brackets, line breaks allowed (they collapse to
-  // spaces when the label is normalised), <= 999 chars
+  // spaces when the label is normalised), <= 999 chars. A label cannot
+  // contain an unescaped [ (an escaped \[ is fine, it becomes a literal
+  // [ in the label).
   let j = i + 1;
   let depth = 1;
   let label = '';
@@ -1270,7 +1287,7 @@ function tryParseDef(text, pos) {
       j += 2;
       continue;
     }
-    if (c === '[') depth++;
+    if (c === '[') return null;
     else if (c === ']') { depth--; if (depth === 0) break; }
     label += c;
     j++;
