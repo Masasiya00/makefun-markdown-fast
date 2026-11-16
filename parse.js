@@ -94,7 +94,8 @@ function numericRef(s, i) {
 
 // Normalise a link label: collapse whitespace runs to one space, trim, lowercase.
 function normLabel(s) {
-  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+  // unescape backslash escapes, collapse whitespace, fold case
+  return s.replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 // Encode a link destination the way marked does (encodeURI, then the text
@@ -110,7 +111,7 @@ function encodeDest(dest) {
 //   txt  {s, pre}      literal text (pre: already escaped, emit as-is)
 //   code {s}           code span content (escapeCode at render)
 //   html {s}           raw HTML, emitted as-is
-//   br                 hard break -> <br />\n
+//   br                 hard break -> <br>
 //   delim {ch, n, open, close}  emphasis run; leftover ones render literally
 //   aStart {href, title}  link open marker; aEnd closes it
 //   img {src, title, alt}
@@ -259,7 +260,9 @@ function parseInlineLinkTail(s, i) {
   j = d[1];
   let title = null;
   const j2 = skipWs(s, j);
-  if (j2 < s.length && (s.charCodeAt(j2) === CODE_QUOT || s.charCodeAt(j2) === CODE_APOS || s.charCodeAt(j2) === 40)) {
+  // a title must be preceded by whitespace; a title glued to the
+  // destination makes the link invalid
+  if (j2 > j && j2 < s.length && (s.charCodeAt(j2) === CODE_QUOT || s.charCodeAt(j2) === CODE_APOS || s.charCodeAt(j2) === 40)) {
     const t = parseTitle(s, j2);
     if (!t) return null;
     title = t[0];
@@ -797,7 +800,7 @@ function scanInline(src, refs) {
       if (spaces >= 2) {
         buf = buf.slice(0, buf.length - spaces);
         push(mkNode('br'));
-        // the newline itself is part of the <br /> output
+        // the newline is consumed by the hard break
       } else {
         appendText('\n');
       }
@@ -945,7 +948,7 @@ function renderNodes(head) {
         out += nd.s;
         break;
       case 'br':
-        out += '<br />\n';
+        out += '<br>';
         break;
       case 'delim':
         out += nd.ch.repeat(nd.n);
@@ -981,7 +984,7 @@ function renderKids(kids) {
       case 'txt': out += nd.pre ? nd.s : escapeText(nd.s); break;
       case 'code': out += '<code>' + escapeCode(nd.s) + '</code>'; break;
       case 'html': out += nd.s; break;
-      case 'br': out += '<br />\n'; break;
+      case 'br': out += '<br>'; break;
       case 'delim': out += nd.ch.repeat(nd.n); break;
       case 'aStart': {
         out += '<a href="' + escapeText(encodeDest(nd.href)) + '"';
@@ -1280,15 +1283,18 @@ function tryParseDef(text, pos) {
   const dest = d[0];
   j = d[1];
   let title = null;
-  // optional title: skip ws, maybe one newline, then title
+  // optional title: skip ws, maybe one newline, then title. A title must
+  // be preceded by whitespace (or a newline); a title glued to the
+  // destination makes the whole definition invalid.
   let j2 = skipInlineWs(text, j);
   let hasNl = false;
-  if (j2 < n && text[j2] === '\n') { hasNl = true; j2++; j2 = skipInlineWs(text, j2); }
+  let sawWs = j2 > j;
+  if (j2 < n && text[j2] === '\n') { hasNl = true; j2++; j2 = skipInlineWs(text, j2); sawWs = true; }
   if (j2 < n && (text[j2] === '"' || text[j2] === "'" || text[j2] === '(')) {
+    if (!sawWs) return null; // title glued to the destination
     const t = parseTitle(text, j2);
     if (!t) {
-      // a title that fails to parse: the def is invalid unless the line just ends
-      if (hasNl) return null;
+      // a title that fails to parse: the def is invalid
       return null;
     }
     title = t[0];
@@ -1589,9 +1595,11 @@ function parseBlocks(lines, refs) {
 
       if (top.t === 'code' && top.fenced) {
         if (isClosingFence(curRest(cur), top.fence)) {
+          // the closing fence line is consumed by the code block
           stack.pop();
           finalize(top);
-          continue;
+          done = true;
+          break;
         }
         top.content += curRest(cur) + '\n';
         done = true;
@@ -1797,7 +1805,8 @@ function renderBlock(b, refs) {
       if (b.fenced) {
         let lang = '';
         if (b.info) {
-          const word = b.info.split(/[ \t]/)[0];
+          // the info string's first word, with backslash escapes resolved
+          const word = b.info.split(/[ \t]/)[0].replace(/\\([!-/:-@[-`{-~])/g, '$1');
           if (word) lang = ' class="language-' + escapeText(word) + '"';
         }
         return '<pre><code' + lang + '>' + escapeCode(b.content) + '</code></pre>\n';
@@ -1807,7 +1816,7 @@ function renderBlock(b, refs) {
     case 'html':
       return b.content;
     case 'hr':
-      return '<hr />\n';
+      return '<hr>\n';
     case 'quote':
       return '<blockquote>\n' + renderBlocks(b.children, refs) + '</blockquote>\n';
     case 'list': {
@@ -1864,51 +1873,29 @@ function renderItem(item, tight, refs) {
     task = taskMarker(kids[0].text);
     if (task) firstText = task.rest;
   }
-  if (tight && kids.length === 1 && kids[0].t === 'para') {
-    if (task) {
-      out += task.checked
-        ? '<input checked="" disabled="" type="checkbox">'
-        : '<input disabled="" type="checkbox">';
-      if (firstText !== '') out += ' ' + parseInline(firstText, refs);
-    } else {
-      out += parseInline(kids[0].text, refs);
-    }
-    return out + '</li>\n';
-  }
-  // loose, or multiple children: render blocks normally, but the task
-  // checkbox (if any) replaces the marker in the first paragraph
   for (let i = 0; i < kids.length; i++) {
     const k = kids[i];
     if (i === 0 && task) {
-      out += task.checked
+      // the checkbox replaces the marker in the first paragraph
+      const box = task.checked
         ? '<input checked="" disabled="" type="checkbox">'
         : '<input disabled="" type="checkbox">';
-      if (firstText !== '') out += ' ' + parseInline(firstText, refs);
-      // render the rest of the paragraph (its text after the marker) as a
-      // paragraph only if there is more content; here firstText IS the whole
-      // paragraph text after the marker, so wrap it in <p> when loose
       if (tight) {
-        // single para handled above; this branch is loose
+        out += box;
+        if (firstText !== '') out += ' ' + parseInline(firstText, refs);
+      } else {
+        out += '<p>' + box;
+        if (firstText !== '') out += ' ' + parseInline(firstText, refs);
+        out += '</p>\n';
       }
-      // for loose lists the paragraph gets <p> tags around the content
-      // (re-render as a paragraph below)
-      out = out.slice(0, out.length); // no-op, clarity
-      // Replace the paragraph rendering: emit <p>...</p> with checkbox inside
-      // We already emitted the checkbox; now emit the paragraph content.
-      // To keep it simple, reconstruct: remove what we emitted and redo.
-      // (This path is rare; handle by direct emission.)
-      // Actually: for a loose list, the first paragraph renders as
-      // <p><input ...> text</p>. We emitted '<li><input ...> text' so far.
-      // Fix by wrapping: we need <p> before the input. Rebuild:
-      out = '<li><p>';
-      out += task.checked
-        ? '<input checked="" disabled="" type="checkbox">'
-        : '<input disabled="" type="checkbox">';
-      if (firstText !== '') out += ' ' + parseInline(firstText, refs);
-      out += '</p>\n';
       continue;
     }
-    out += renderBlock(k, refs);
+    // in a tight list every paragraph renders as inline content (no <p>)
+    if (k.t === 'para' && tight) {
+      out += parseInline(k.text, refs);
+    } else {
+      out += renderBlock(k, refs);
+    }
   }
   return out + '</li>\n';
 }
