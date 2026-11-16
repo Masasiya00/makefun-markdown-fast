@@ -329,6 +329,10 @@ function isEmail(s) { return EMAIL_RE.test(s); }
 function matchRawHtml(s, i) {
   const n = s.length;
   if (s.startsWith('<!--', i)) {
+    // abruptly closed empty comments <!--> and <!---> end right here;
+    // otherwise the comment runs to the first -->
+    if (s.charCodeAt(i + 4) === CODE_GT) return i + 5;
+    if (s.charCodeAt(i + 4) === 45 && s.charCodeAt(i + 5) === CODE_GT) return i + 6;
     const e = s.indexOf('-->', i + 4);
     if (e === -1) return null;
     return e + 3;
@@ -358,19 +362,24 @@ function matchRawHtml(s, i) {
   if (s.charCodeAt(j) === 47) { closing = true; j++; } // '/'
   if (j >= n || !isAlpha(s.charCodeAt(j))) return null;
   while (j < n && (isAlnum(s.charCodeAt(j)) || s.charCodeAt(j) === 45)) j++; // name
-  // attributes
+  // attributes: each attribute must be preceded by whitespace (a ':' or
+  // '.' directly after the tag name, as in <m:abc> or <foo.bar>, is not
+  // a valid attribute and makes the whole thing not a tag)
+  let needWs = true;
   while (j < n) {
     const c = s.charCodeAt(j);
-    if (c === CODE_SPACE || c === CODE_TAB || c === CODE_NL) { j++; continue; }
+    if (c === CODE_SPACE || c === CODE_TAB || c === CODE_NL) { j++; needWs = false; continue; }
     if (c === CODE_GT) return j + 1;
     if (c === 47 && j + 1 < n && s.charCodeAt(j + 1) === CODE_GT) return j + 2; // '/>'
+    if (needWs) return null;
     // attribute name
-    if (!(isAlpha(c) || c === 95 || c === 58 || isDigit(c) || c === 45 || c === 46)) return null;
+    if (!(isAlpha(c) || c === 95 || c === 58)) return null;
     while (j < n) {
       const a = s.charCodeAt(j);
       if (isAlnum(a) || a === 95 || a === 58 || a === 45 || a === 46) j++;
       else break;
     }
+    needWs = true;
     // optional = value
     let k = j;
     while (k < n && (s.charCodeAt(k) === CODE_SPACE || s.charCodeAt(k) === CODE_TAB)) k++;
@@ -705,9 +714,11 @@ function scanInline(src, refs) {
     // --- backslash escapes ---
     if (c === CODE_BACKSLASH) {
       if (i + 1 < n && src.charCodeAt(i + 1) === CODE_NL) {
-        // backslash-newline: hard break
+        // backslash-newline: hard break; the next line's leading
+        // whitespace is stripped
         push(mkNode('br'));
         i += 2;
+        while (i < n && (src.charCodeAt(i) === CODE_SPACE || src.charCodeAt(i) === CODE_TAB)) i++;
         prevChar = CODE_NL;
         continue;
       }
@@ -891,13 +902,18 @@ function scanInline(src, refs) {
       if (spaces >= 2) {
         buf = buf.slice(0, buf.length - spaces);
         push(mkNode('br'));
-        // the newline is consumed by the hard break
+        // the newline is consumed by the hard break; the next line's
+        // leading whitespace is stripped
+        i++;
+        while (i < n && (src.charCodeAt(i) === CODE_SPACE || src.charCodeAt(i) === CODE_TAB)) i++;
+        prevChar = CODE_NL;
+        continue;
       } else {
         appendText('\n');
+        i++;
+        prevChar = CODE_NL;
+        continue;
       }
-      i++;
-      prevChar = CODE_NL;
-      continue;
     }
     // --- plain text run ---
     // Stop at a word start (a word char preceded by a non-word char): an
@@ -1221,7 +1237,7 @@ function curRestore(c, s) { c.i = s.i; c.col = s.col; c.part = s.part; }
 
 // ---------------------------------------------------------------- block parser
 
-const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option p param section source summary table tbody td tfoot th thead title tr track ul').split(' '));
+const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem meta nav noframes ol optgroup option p param section source summary table tbody td tfoot th thead title tr track ul').split(' '));
 
 // A setext underline at the start of s (after up to 3 spaces): returns 1 for
 // '=', 2 for '-', else 0. Only the marker char and spaces may follow.
@@ -1257,16 +1273,19 @@ function isThematicBreak(s) {
 // ATX heading: returns {level, content} or null. s is the line from the
 // block-start position (up to 3 leading spaces already stripped by caller).
 function atxHeading(s) {
-  let i = 0;
+  let start = 0, spaces = 0;
+  while (start < s.length && s[start] === ' ' && spaces < 3) { start++; spaces++; }
+  let i = start;
   while (i < s.length && s[i] === '#') i++;
-  if (i === 0 || i > 6) return null;
+  const hashes = i - start;
+  if (hashes === 0 || hashes > 6) return null;
   if (i < s.length && s[i] !== ' ' && s[i] !== '\t') return null;
   let content = s.slice(i).replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
   // closing sequence of #'s preceded by a space (or the whole content)
   const m = content.match(/^(.*?)[ \t]+#+$/);
   if (m) content = m[1].replace(/[ \t]+$/, '');
   else if (/^#+$/.test(content)) content = '';
-  return { level: i, content };
+  return { level: hashes, content };
 }
 
 // Fence start: returns {char, len, info} or null.
@@ -1282,7 +1301,7 @@ function fenceStart(s) {
   if (len < 3) return null;
   const info = s.slice(j).replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
   if (ch === '`' && info.includes('`')) return null;
-  return { char: ch, len, info };
+  return { char: ch, len, info, indent: spaces };
 }
 
 // Is this line a closing fence for the given fence?
@@ -1317,7 +1336,8 @@ function htmlBlockStart(s) {
   if (low.startsWith('<?')) return { type: 3, endTag: '?>' };
   if (low.startsWith('<!') && low.length > 2 && /[a-z]/.test(low[2])) return { type: 4, endTag: '>' };
   if (low.startsWith('<![cdata[')) return { type: 5, endTag: ']]>' };
-  // type 6: block tag (open or close), followed by space/tab/newline/> or end
+  // type 6: a block tag (open or close) starts a block no matter what
+  // follows it on the line
   let m = low.match(/^<\/?([a-z][a-z0-9-]*)/);
   if (m && BLOCK_TAGS.has(m[1])) {
     const after = rest[m[0].length];
@@ -1325,9 +1345,15 @@ function htmlBlockStart(s) {
       return { type: 6, endTag: null };
     }
   }
-  // type 7: a complete open or closing tag, nothing else on the line
-  m = rest.match(/^<\/?[a-zA-Z][a-zA-Z0-9-]*(?:\s+[^<>]*)?\/?>[ \t]*$/);
-  if (m) return { type: 7, endTag: null };
+  // any other tag starts a block only when it is the sole content of the
+  // line and is a complete valid tag (<a href="foo"> alone is a block,
+  // but <a href="foo"> bar, <a><bab>, or an invalid <a h*#ref="hi"> is
+  // paragraph text). This is type 7: it cannot interrupt a paragraph,
+  // but when it does start a block it still runs until a blank line.
+  if (m) {
+    const end = matchRawHtml(rest, 0);
+    if (end !== null && rest.slice(end).trim() === '') return { type: 7, endTag: null };
+  }
   return null;
 }
 
@@ -1482,7 +1508,9 @@ function splitRow(line) {
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (c === '\\' && i + 1 < line.length && line[i + 1] === '|') {
-      cur += '\\|';
+      // an escaped pipe is a cell separator that isn't one: unescape it
+      // here, before inline parsing, so a code span sees `|` not `\|`
+      cur += '|';
       i++;
       continue;
     }
@@ -1619,9 +1647,12 @@ function parseBlocks(lines, refs) {
     if (b.t === 'list') b.closed = true;
   }
 
-  function closeTo(depth) {
+  function closeTo(depth, isFinal) {
     while (stack.length - 1 > depth) {
       const b = stack.pop();
+      // an HTML block cut off by its parent container ending (blockquote
+      // or list item) loses its trailing newline; at EOF it keeps it
+      if (!isFinal && b.t === 'html' && (b.type === 6 || b.type === 7)) b.stripNl = true;
       finalize(b);
     }
   }
@@ -1742,8 +1773,14 @@ function parseBlocks(lines, refs) {
       const top = stack[stack.length - 1];
       if (curBlank(cur)) {
         if (top.t === 'code') {
-          // blank line inside code: content, not a structural blank
-          top.content += '\n';
+          // blank line inside code: content, not a structural blank.
+          // A whitespace-only line keeps its spaces (minus the fence
+          // indent, or the 4-space code indent for indented code).
+          let line = curRest(cur);
+          const ind = top.fenced ? (top.fence.indent || 0) : 4;
+          let k = 0;
+          while (k < line.length && k < ind && line[k] === ' ') k++;
+          top.content += line.slice(k) + '\n';
           done = true;
           break;
         }
@@ -1812,7 +1849,12 @@ function parseBlocks(lines, refs) {
           done = true;
           break;
         }
-        top.content += curRest(cur) + '\n';
+        // content lines lose up to the opening fence's indent
+        let line = curRest(cur);
+        const ind = top.fence.indent || 0;
+        let k = 0;
+        while (k < line.length && k < ind && line[k] === ' ') k++;
+        top.content += line.slice(k) + '\n';
         done = true;
         break;
       }
@@ -1831,13 +1873,6 @@ function parseBlocks(lines, refs) {
 
       if (top.t === 'html') {
         const line = curRest(cur);
-        // type 7 is a single complete tag: it ends after its first line,
-        // so a following line is never part of it
-        if (top.type === 7) {
-          stack.pop();
-          finalize(top);
-          continue;
-        }
         top.content += line + '\n';
         if (top.endTag && line.toLowerCase().includes(top.endTag.toLowerCase())) {
           // the trailing newline is stripped only if the next line is a
@@ -1864,7 +1899,9 @@ function parseBlocks(lines, refs) {
         while (sp < 3 && curChar(cur) === ' ') { curAdvance(cur, 1); sp++; }
         const lm2 = listMarker(curRest(cur));
         curRestore(cur, snap);
-        const sameList = lm2 && lm2.indent === 0 && sameListKind(lm2, top);
+        // a thematic break (e.g. `* * *`) looks like a list marker but
+        // ends the list instead of starting a new item
+        const sameList = lm2 && lm2.indent === 0 && sameListKind(lm2, top) && !isThematicBreak(curRest(cur));
         if (!sameList) {
           stack.pop();
           finalize(top);
@@ -1893,11 +1930,11 @@ function parseBlocks(lines, refs) {
         const hb = { t: 'html', type: html.type, endTag: html.endTag, content: rest + '\n' };
         addBlock(hb);
         // a block whose first line already contains its end tag is
-        // complete (one-line comment <!-- --> or <script>x</script>);
-        // a type-7 block is a single complete tag by definition. Push
-        // only blocks that still need more lines, or they absorb the
-        // lines that follow as raw HTML.
-        const endsNow = html.type === 7 || (html.endTag && rest.toLowerCase().includes(html.endTag.toLowerCase()));
+        // complete (one-line comment <!-- --> or <script>x</script>).
+        // Push only blocks that still need more lines, or they absorb
+        // the lines that follow as raw HTML. (Type 7 is NOT complete
+        // after one line: it runs until a blank line like type 6.)
+        const endsNow = (html.endTag && rest.toLowerCase().includes(html.endTag.toLowerCase()));
         if (endsNow) {
           let strip = false;
           if (li + 1 < lines.length && /^[ \t]*$/.test(lines[li + 1])) strip = true;
@@ -2016,7 +2053,7 @@ function parseBlocks(lines, refs) {
     }
     li++;
   }
-  closeTo(0);
+  closeTo(0, true);
   // mark lists closed (for the sibling check above)
   return doc.children;
 }
