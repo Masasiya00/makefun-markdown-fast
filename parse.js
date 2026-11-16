@@ -537,10 +537,12 @@ function matchEmailAt(s, i) {
   let email = local + '@' + domain;
   email = trimAutolink(email);
   if (email === '' || !email.includes('@')) return null;
-  // a word character immediately after the address means it is part of a
-  // larger token (e.g. a.b@a.b_), not a standalone autolink
+  // An alphanumeric character immediately after the address means it is
+  // part of a larger token (e.g. a@b.comx). A trailing '_' does NOT block
+  // the autolink: it is usually an emphasis closer
+  // (_warning a@b.com_), and marked still autolinks there.
   const afterIdx = i + email.length;
-  if (afterIdx < n && isWord(s.charCodeAt(afterIdx))) return null;
+  if (afterIdx < n && isAlnum(s.charCodeAt(afterIdx))) return null;
   return { href: 'mailto:' + email, text: email, end: i + email.length };
 }
 
