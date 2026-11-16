@@ -1507,6 +1507,11 @@ function parseBlocks(lines, refs) {
   let li = 0;
   while (li < lines.length) {
     const cur = makeCursor(lines[li]);
+    // whether this source line is blank (only whitespace): a line that is
+    // blank only after its container markers are consumed (e.g. a bare
+    // `>` blockquote line) is NOT a blank line, and must not loosen a
+    // list or close an empty item
+    const srcBlank = /^[ \t]*$/.test(lines[li]);
     // ---- Phase 1: match open containers ----
     let depth = 0;
     let lazy = false;
@@ -1541,8 +1546,12 @@ function parseBlocks(lines, refs) {
           let newItem = false;
           const lm0 = listMarker(curRest(cur));
           if (lm0) {
+            // a list marker is never a lazy continuation of a paragraph
+            // that lives inside a list: it either continues the enclosing
+            // list (same kind) or starts a new list (different bullet or
+            // delimiter), it never becomes paragraph text
             for (let k = 1; k < stack.length - 1; k++) {
-              if (stack[k].t === 'list' && sameListKind(lm0, stack[k])) { newItem = true; break; }
+              if (stack[k].t === 'list') { newItem = true; break; }
             }
           }
           if (!newItem && !interruptsPara(curRest(cur))) lazy = true;
@@ -1569,8 +1578,12 @@ function parseBlocks(lines, refs) {
           let newItem = false;
           const lm0 = listMarker(curRest(cur));
           if (lm0) {
+            // a list marker is never a lazy continuation of a paragraph
+            // that lives inside a list: it either continues the enclosing
+            // list (same kind) or starts a new list (different bullet or
+            // delimiter), it never becomes paragraph text
             for (let k = 1; k < stack.length - 1; k++) {
-              if (stack[k].t === 'list' && sameListKind(lm0, stack[k])) { newItem = true; break; }
+              if (stack[k].t === 'list') { newItem = true; break; }
             }
           }
           if (!newItem && !interruptsPara(curRest(cur))) lazy = true;
@@ -1628,7 +1641,9 @@ function parseBlocks(lines, refs) {
             top.content += '\n';
           }
         }
-        lastBlank = true;
+        // only a real source-blank line counts as a blank line for
+        // looseness / empty-item purposes
+        if (srcBlank) lastBlank = true;
         done = true;
         break;
       }
@@ -1753,7 +1768,20 @@ function parseBlocks(lines, refs) {
       if (html) {
         const hb = { t: 'html', type: html.type, endTag: html.endTag, content: rest + '\n' };
         addBlock(hb);
-        stack.push(hb);
+        // a block whose first line already contains its end tag is
+        // complete (one-line comment <!-- --> or <script>x</script>);
+        // a type-7 block is a single complete tag by definition. Push
+        // only blocks that still need more lines, or they absorb the
+        // lines that follow as raw HTML.
+        const endsNow = html.type === 7 || (html.endTag && rest.toLowerCase().includes(html.endTag.toLowerCase()));
+        if (endsNow) {
+          let strip = false;
+          if (li + 1 < lines.length && /^[ \t]*$/.test(lines[li + 1])) strip = true;
+          hb.stripNl = strip;
+          finalize(hb);
+        } else {
+          stack.push(hb);
+        }
         done = true;
         break;
       }
