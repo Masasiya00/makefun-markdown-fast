@@ -1079,6 +1079,27 @@ function processEmphasis(head, delims) {
         current = current.dNext;
         continue;
       }
+      // A code span whose content contains a backtick, inside a bracket
+      // pair that failed to form a link, blocks the emphasis: marked's
+      // label scanner never registers the `_` delimiters as emphasis
+      // when the label contains such a code span, so the `_..._` stays
+      // literal (e.g. [but _previous from `` a ` b ``_](...) keeps the
+      // underscores). The bracket is still a literal '[' node.
+      let badCode = false;
+      for (const kd of kids) if (kd.t === 'code' && kd.s.includes('`')) { badCode = true; break; }
+      if (badCode) {
+        let nd = found.prev;
+        let steps = 0;
+        while (nd && steps < 40) {
+          if (nd.t === 'txt' && nd.bracket) { badCode = true; break; }
+          if (nd.t === 'aStart' || nd.t === 'aEnd') break;
+          nd = nd.prev; steps++;
+        }
+        if (nd && nd.t === 'txt' && nd.bracket) {
+          current = current.dNext;
+          continue;
+        }
+      }
       // trap the delimiters inside this emphasis: they can only pair
       // with delimiters trapped in the same emphasis, not with ones
       // outside it
