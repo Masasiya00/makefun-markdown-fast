@@ -1991,6 +1991,20 @@ function parseBlocks(lines, refs, endsWithNl) {
         // paragraph line instead.
         const lvl = setextLevel(curRest(cur));
         if (lvl) {
+          // A table paragraph (header + delimiter row) never becomes
+          // a setext heading: the underline line is just another table
+          // row (e.g. `=========` after a table is a single-cell row).
+          let isTable = false;
+          if (top.lines.length >= 2) {
+            const h0 = splitRow(top.lines[0]);
+            const a0 = delimiterRow(top.lines[1]);
+            if (h0.length > 0 && a0 && a0.length === h0.length) isTable = true;
+          }
+          if (isTable) {
+            top.lines.push(curRestExpanded(cur));
+            done = true;
+            break;
+          }
           const text = stripDefs(top.lines.join('\n'), refs);
           if (text !== '') {
             top.t = 'heading';
