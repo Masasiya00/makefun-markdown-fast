@@ -109,12 +109,9 @@ function encodeDest(dest) {
   let out = '';
   for (let i = 0; i < dest.length; i++) {
     const c = dest[i];
-    if (c === '%' && i + 2 < dest.length &&
-        /^[0-9a-fA-F]$/.test(dest[i + 1]) && /^[0-9a-fA-F]$/.test(dest[i + 2])) {
-      out += dest.slice(i, i + 3);
-      i += 2;
-      continue;
-    }
+    // a % is never encoded: a valid %XX stays, and a bare % (as in
+    // 98%-blue) stays too (marked does not turn it into %25)
+    if (c === '%') { out += '%'; continue; }
     out += encodeURI(c);
   }
   return out;
@@ -429,7 +426,7 @@ function matchRawHtml(s, i) {
 // with 'www.' at i, or when an email may start at i. Returns {href, text, end}
 // or null. The preceding character must not be a word character (checked by
 // the caller for www.; for email the local part must start at i).
-function matchWww(s, i) {
+function matchWww(s, i, inBracket) {
   const n = s.length;
   if (!s.startsWith('www.', i)) return null;
   let j = i + 4;
@@ -452,11 +449,13 @@ function matchWww(s, i) {
     if (lab === '' || lab.startsWith('-') || lab.endsWith('-')) return null;
   }
   j = start + domain.length;
-  // optional path: any chars except whitespace and '<'
+  // optional path: any chars except whitespace and '<'; inside link text
+  // a ']' ends the URL so it can close the bracket instead
   let end = j;
   while (end < n) {
     const c = s.charCodeAt(end);
     if (c === CODE_SPACE || c === CODE_TAB || c === CODE_NL || c === CODE_LT) break;
+    if (inBracket && c === 93) break;
     end++;
   }
   let url = s.slice(i, end);
@@ -467,7 +466,7 @@ function matchWww(s, i) {
 
 // Match a GFM extended autolink with a scheme (http://, https://,
 // mailto:, xmpp:, ...) at s[i]. Returns {href, text, end} or null.
-function matchScheme(s, i) {
+function matchScheme(s, i, inBracket) {
   const n = s.length;
   let k = i;
   if (k >= n || !isAlpha(s.charCodeAt(k))) return null;
@@ -482,6 +481,7 @@ function matchScheme(s, i) {
     while (end < n) {
       const c = s.charCodeAt(end);
       if (c === CODE_SPACE || c === CODE_TAB || c === CODE_NL || c === CODE_LT) break;
+      if (inBracket && c === 93) break;
       end++;
     }
     let url = s.slice(i, end);
@@ -677,12 +677,35 @@ function scanInline(src, refs) {
       dest = ref.dest; title = ref.title;
       if (end === -1) end = i + 1;
     }
-    // A link cannot contain a link, but it CAN contain an image. An
-    // image CAN contain a link (the link's text becomes part of the alt).
+    // A link cannot contain an explicit link, but it CAN contain an
+    // image. An extended autolink inside it is dropped (its text stays
+    // literal) so the outer link can still form. An angle autolink is
+    // kept (marked nests it). An image CAN contain a link (the link's
+    // text becomes part of the alt).
     if (!br.img) {
       let nd = br.next;
       while (nd) {
-        if (nd.t === 'aStart' || nd.t === 'aEnd') return null;
+        if (nd.t === 'aStart') {
+          if (nd.angle) { nd = nd.next; continue; }
+          if (nd.auto) {
+            // strip this autolink: unlink its aStart and matching aEnd,
+            // keeping the text between them
+            let en = nd.next;
+            while (en && en.t !== 'aEnd') en = en.next;
+            const before = nd.prev, after = en ? en.next : null;
+            if (before) before.next = nd.next; else head = nd.next;
+            if (nd.next) nd.next.prev = before;
+            if (en) {
+              if (after) after.prev = en.prev;
+              if (en.prev) en.prev.next = after;
+              if (tail === en) tail = en.prev;
+            }
+            if (tail === nd) tail = before;
+            nd = after;
+            continue;
+          }
+          return null;
+        }
         nd = nd.next;
       }
     }
@@ -783,7 +806,8 @@ function scanInline(src, refs) {
     if (c === CODE_LT) {
       const auto = matchAngleAutolink(src, i);
       if (auto) {
-        push(mkNode('aStart', { href: auto.href, title: null }));
+        // angle autolinks may nest inside a link (marked keeps them)
+        push(mkNode('aStart', { href: auto.href, title: null, angle: true }));
         push(mkNode('txt', { s: auto.text }));
         push(mkNode('aEnd'));
         i = auto.end;
@@ -879,9 +903,9 @@ function scanInline(src, refs) {
     }
     // --- extended autolinks: www. ---
     if (c === 119 && src.startsWith('www.', i) && !isWord(prevChar)) {
-      const w = matchWww(src, i);
+      const w = matchWww(src, i, brackets.length > 0);
       if (w) {
-        push(mkNode('aStart', { href: w.href, title: null }));
+        push(mkNode('aStart', { href: w.href, title: null, auto: true }));
         push(mkNode('txt', { s: w.text }));
         push(mkNode('aEnd'));
         i = w.end;
@@ -891,9 +915,9 @@ function scanInline(src, refs) {
     }
     // --- extended autolinks: scheme (http://, mailto:, xmpp:, ...) ---
     if (isAlpha(c) && !isWord(prevChar)) {
-      const sc = matchScheme(src, i);
+      const sc = matchScheme(src, i, brackets.length > 0);
       if (sc) {
-        push(mkNode('aStart', { href: sc.href, title: null }));
+        push(mkNode('aStart', { href: sc.href, title: null, auto: true }));
         push(mkNode('txt', { s: sc.text }));
         push(mkNode('aEnd'));
         i = sc.end;
@@ -905,7 +929,7 @@ function scanInline(src, refs) {
     if (c !== CODE_SPACE && c !== CODE_TAB && c !== CODE_NL && !isWord(prevChar)) {
       const e = matchEmailAt(src, i);
       if (e) {
-        push(mkNode('aStart', { href: e.href, title: null }));
+        push(mkNode('aStart', { href: e.href, title: null, auto: true }));
         push(mkNode('txt', { s: e.text }));
         push(mkNode('aEnd'));
         i = e.end;
@@ -1906,9 +1930,17 @@ function parseBlocks(lines, refs, endsWithNl) {
           }
           // else: fall through and add this line to the paragraph
         }
-        // interrupting block starts?
+        // interrupting block starts? A non-1 ordered list cannot
+        // interrupt a paragraph at the top level, but it CAN start a
+        // nested list inside a list item (the paragraph lives in an
+        // item, so the marker is a child list, not a sibling).
         const rest = curRest(cur);
-        if (interruptsPara(rest)) {
+        let interrupts = interruptsPara(rest);
+        if (!interrupts) {
+          const lm = listMarker(rest);
+          if (lm && lm.ordered && stack.some((b) => b.t === 'item')) interrupts = true;
+        }
+        if (interrupts) {
           stack.pop();
           finalize(top);
           continue; // re-process the line as a new block
@@ -1926,8 +1958,9 @@ function parseBlocks(lines, refs, endsWithNl) {
           done = true;
           break;
         }
-        // content lines lose up to the opening fence's indent
-        let line = curRest(cur);
+        // content lines lose up to the opening fence's indent; a
+        // leading tab expands to spaces (column-aware)
+        let line = curRestExpanded(cur);
         const ind = top.fence.indent || 0;
         let k = 0;
         while (k < line.length && k < ind && line[k] === ' ') k++;
