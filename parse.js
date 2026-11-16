@@ -1501,7 +1501,12 @@ function splitRow(line) {
 }
 
 // Is this line a table delimiter row? Returns the alignments array or null.
+// A delimiter row has at most 3 leading spaces, like other block starts;
+// 4+ spaces is indented code / paragraph text, not a delimiter.
 function delimiterRow(line) {
+  let sp = 0;
+  while (sp < line.length && line[sp] === ' ') sp++;
+  if (sp >= 4) return null;
   const cells = splitRow(line);
   if (cells.length === 0) return null;
   const aligns = [];
@@ -1519,13 +1524,12 @@ function delimiterRow(line) {
 // ---------------------------------------------------------------- block parsing
 
 // Does the line (from a block-start position) begin a block that would
-// interrupt a paragraph? Setext underlines, ATX/fenced-code/HTML
-// (types 1-6)/thematic-break starts, blockquotes, and non-empty list
-// items (ordered lists only from 1) all interrupt. Used both for the
-// paragraph-interruption check and for lazy-continuation decisions:
-// a line that interrupts a paragraph is never a lazy continuation.
+// interrupt a paragraph? ATX/fenced-code/HTML (types 1-6)/thematic-break
+// starts, blockquotes, and non-empty list items (ordered lists only from
+// 1) all interrupt. A setext underline is deliberately NOT here: it is
+// handled before this check in phase 2, and a lazy setext-looking line
+// inside a container is paragraph text, not a heading underline.
 function interruptsPara(s) {
-  if (setextLevel(s)) return true;
   if (atxHeading(s) || fenceStart(s) || isThematicBreak(s)) return true;
   const html = htmlBlockStart(s);
   if (html && html.type !== 7) return true;
@@ -1778,7 +1782,9 @@ function parseBlocks(lines, refs) {
           if (text !== '') {
             top.t = 'heading';
             top.level = lvl;
-            top.content = text;
+            // a setext heading's content is the paragraph text with
+            // leading/trailing whitespace stripped
+            top.content = text.trim();
             delete top.lines;
             stack.pop();
             done = true;
