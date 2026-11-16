@@ -1842,8 +1842,11 @@ function parseBlocks(lines, refs, endsWithNl) {
         }
         // A fenced code block absorbs lines that do not match the
         // container (lazy code content), unless the line closes it.
+        // A list marker is never lazy code content: a marker outside
+        // the item's indent starts a new item (or a new list), so the
+        // code block closes and the marker is processed as a list.
         const topI = stack[stack.length - 1];
-        if (topI.t === 'code' && topI.fenced && !curBlank(cur) && !isClosingFence(curRest(cur), topI.fence)) {
+        if (topI.t === 'code' && topI.fenced && !curBlank(cur) && !isClosingFence(curRest(cur), topI.fence) && !listMarker(curRest(cur))) {
           lazy = true;
           break;
         }
