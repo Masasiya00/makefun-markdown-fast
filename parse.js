@@ -362,6 +362,13 @@ function matchRawHtml(s, i) {
   if (s.charCodeAt(j) === 47) { closing = true; j++; } // '/'
   if (j >= n || !isAlpha(s.charCodeAt(j))) return null;
   while (j < n && (isAlnum(s.charCodeAt(j)) || s.charCodeAt(j) === 45)) j++; // name
+  // a closing tag takes no attributes: </name> with only optional
+  // whitespace before the > (</a href="foo"> is not a tag at all)
+  if (closing) {
+    while (j < n && (s.charCodeAt(j) === CODE_SPACE || s.charCodeAt(j) === CODE_TAB || s.charCodeAt(j) === CODE_NL)) j++;
+    if (j < n && s.charCodeAt(j) === CODE_GT) return j + 1;
+    return null;
+  }
   // attributes: each attribute must be preceded by whitespace (a ':' or
   // '.' directly after the tag name, as in <m:abc> or <foo.bar>, is not
   // a valid attribute and makes the whole thing not a tag)
@@ -382,10 +389,10 @@ function matchRawHtml(s, i) {
     needWs = true;
     // optional = value
     let k = j;
-    while (k < n && (s.charCodeAt(k) === CODE_SPACE || s.charCodeAt(k) === CODE_TAB)) k++;
+    while (k < n && (s.charCodeAt(k) === CODE_SPACE || s.charCodeAt(k) === CODE_TAB || s.charCodeAt(k) === CODE_NL)) k++;
     if (k < n && s.charCodeAt(k) === 61) { // '='
       k++;
-      while (k < n && (s.charCodeAt(k) === CODE_SPACE || s.charCodeAt(k) === CODE_TAB)) k++;
+      while (k < n && (s.charCodeAt(k) === CODE_SPACE || s.charCodeAt(k) === CODE_TAB || s.charCodeAt(k) === CODE_NL)) k++;
       if (k < n && (s.charCodeAt(k) === CODE_QUOT || s.charCodeAt(k) === CODE_APOS)) {
         const q = s.charCodeAt(k);
         k++;
@@ -404,7 +411,12 @@ function matchRawHtml(s, i) {
         j = m;
       }
     } else {
+      // no '=': a valueless attribute. The whitespace skipped looking
+      // for '=' is the separator before the next attribute, so clear
+      // the need for more whitespace when any was skipped.
+      const skippedWs = k > j;
       j = k;
+      needWs = !skippedWs;
     }
   }
   return null;
@@ -1572,7 +1584,7 @@ function interruptsPara(s) {
   return false;
 }
 
-function parseBlocks(lines, refs) {
+function parseBlocks(lines, refs, endsWithNl) {
   const doc = { t: 'doc', children: [] };
   const stack = [doc];
   let lastBlank = false;
@@ -1653,6 +1665,11 @@ function parseBlocks(lines, refs) {
       // an HTML block cut off by its parent container ending (blockquote
       // or list item) loses its trailing newline; at EOF it keeps it
       if (!isFinal && b.t === 'html' && (b.type === 6 || b.type === 7)) b.stripNl = true;
+      // at EOF, if the input had no trailing newline, the last line
+      // contributed no newline to an open HTML block's content
+      if (isFinal && !endsWithNl && b.t === 'html' && b.content.endsWith('\n')) {
+        b.content = b.content.slice(0, -1);
+      }
       finalize(b);
     }
   }
@@ -2182,6 +2199,6 @@ export function parse(markdown) {
   // treating it as a blank line wrongly strips an HTML block's trailing
   // newline and adds a spurious \n to type 1-5 HTML / code blocks at EOF.
   if (src.endsWith('\n') && lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-  const blocks = parseBlocks(lines, refs);
+  const blocks = parseBlocks(lines, refs, src.endsWith('\n'));
   return renderBlocks(blocks, refs);
 }
