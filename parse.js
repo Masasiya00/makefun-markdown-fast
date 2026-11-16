@@ -683,6 +683,18 @@ function scanInline(src, refs) {
       dest = ref.dest; title = ref.title;
       if (end === -1) end = i + 1;
     }
+    // A code span in the link text whose content contains a backtick
+    // blocks the link (marked's label scanner misreads the backtick
+    // run, so the closing ']' is never found) -- but only when text
+    // follows the code span before the ']'. When the code span ends
+    // the link text, the link still forms.
+    {
+      let nd = br.next;
+      while (nd) {
+        if (nd.t === 'code' && nd.s.includes('`') && nd.next) return null;
+        nd = nd.next;
+      }
+    }
     // A link cannot contain an explicit link, but it CAN contain an
     // image. An extended autolink inside it is dropped (its text stays
     // literal) so the outer link can still form. An angle autolink is
