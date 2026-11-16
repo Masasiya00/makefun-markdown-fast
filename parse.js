@@ -1913,8 +1913,20 @@ function parseBlocks(lines, refs, endsWithNl) {
           // blank line inside code: content, not a structural blank.
           // A whitespace-only line keeps its spaces (minus the fence
           // indent, or the 4-space code indent for indented code).
+          // Indented code expands a leading tab to spaces first: a
+          // tab-only line becomes an empty line (4 - 4 = 0), not a
+          // literal tab. (Fenced code keeps the raw tab.)
           let line = curRest(cur);
           const ind = top.fenced ? (top.fence.indent || 0) : 4;
+          if (!top.fenced) {
+            let col = cur.col;
+            let exp = '';
+            for (let p = 0; p < line.length; p++) {
+              if (line[p] === '\t') { const w = 4 - (col % 4); exp += ' '.repeat(w); col += w; }
+              else { exp += ' '; col++; }
+            }
+            line = exp;
+          }
           let k = 0;
           while (k < line.length && k < ind && line[k] === ' ') k++;
           top.content += line.slice(k) + '\n';
