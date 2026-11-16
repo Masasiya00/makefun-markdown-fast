@@ -834,6 +834,9 @@ function scanInline(src, refs) {
       if (d === CODE_BACKSLASH || d === CODE_BACKTICK || d === CODE_LT || d === CODE_LBRACKET ||
         d === CODE_RBRACKET || d === CODE_STAR || d === CODE_UNDER || d === CODE_TILDE ||
         d === CODE_AMP || d === CODE_NL || d === CODE_BANG) break;
+      // a www. autolink can start here: stop the run so the autolink
+      // branch gets a chance (otherwise the run swallows it as text)
+      if (d === 119 && src.startsWith('www.', j)) break;
       j++;
     }
     if (j === i) j = i + 1; // a single char that is special only in context (e.g. '!')
@@ -1039,6 +1042,10 @@ function renderKids(kids) {
 // when the text needs the full parser.
 function fastInline(src) {
   // No backslash, backtick, <, [, ], !, *, _, ~, & and no 2-space hard break.
+  // Also bail when an extended autolink may be present (www. or an email
+  // with @): those are only detected by the full scan, so the fast path
+  // would silently drop them.
+  if (src.includes('www.') || src.includes('@')) return null;
   for (let i = 0; i < src.length; i++) {
     const c = src.charCodeAt(i);
     if (c === 92 || c === 96 || c === 60 || c === 91 || c === 93 || c === 33 ||
