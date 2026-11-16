@@ -466,7 +466,7 @@ function matchWww(s, i, inBracket) {
 
 // Match a GFM extended autolink with a scheme (http://, https://,
 // mailto:, xmpp:, ...) at s[i]. Returns {href, text, end} or null.
-function matchScheme(s, i, inBracket) {
+function matchScheme(s, i, inBracket, allowUnder) {
   const n = s.length;
   let k = i;
   if (k >= n || !isAlpha(s.charCodeAt(k))) return null;
@@ -491,7 +491,7 @@ function matchScheme(s, i, inBracket) {
   }
   // opaque URL (mailto:, xmpp:, ...): an email-like address, optionally
   // followed by one /resource segment (no further /)
-  const e = matchEmailAt(s, j);
+  const e = matchEmailAt(s, j, allowUnder);
   if (!e) return null;
   let url = scheme + ':' + e.text;
   let end = j + e.text.length;
@@ -512,7 +512,7 @@ function matchScheme(s, i, inBracket) {
   return { href: url, text: url, end: i + url.length };
 }
 
-function matchEmailAt(s, i) {
+function matchEmailAt(s, i, allowUnder) {
   const n = s.length;
   // local part
   let j = i;
@@ -537,12 +537,16 @@ function matchEmailAt(s, i) {
   let email = local + '@' + domain;
   email = trimAutolink(email);
   if (email === '' || !email.includes('@')) return null;
-  // An alphanumeric character immediately after the address means it is
-  // part of a larger token (e.g. a@b.comx). A trailing '_' does NOT block
-  // the autolink: it is usually an emphasis closer
-  // (_warning a@b.com_), and marked still autolinks there.
+  // A word character immediately after the address means it is part of a
+  // larger token (e.g. a.b@a.b_), not a standalone autolink -- unless
+  // the '_' is an emphasis closer (an '_' delimiter is open), in which
+  // case marked still autolinks (_warning a@b.com_).
   const afterIdx = i + email.length;
-  if (afterIdx < n && isAlnum(s.charCodeAt(afterIdx))) return null;
+  if (afterIdx < n) {
+    const ac = s.charCodeAt(afterIdx);
+    if (isAlnum(ac)) return null;
+    if (ac === 95 && !allowUnder) return null;
+  }
   return { href: 'mailto:' + email, text: email, end: i + email.length };
 }
 
@@ -917,7 +921,8 @@ function scanInline(src, refs) {
     }
     // --- extended autolinks: scheme (http://, mailto:, xmpp:, ...) ---
     if (isAlpha(c) && !isWord(prevChar)) {
-      const sc = matchScheme(src, i, brackets.length > 0);
+      const allowUnder = delims.some((d) => d.ch === '_');
+      const sc = matchScheme(src, i, brackets.length > 0, allowUnder);
       if (sc) {
         push(mkNode('aStart', { href: sc.href, title: null, auto: true }));
         push(mkNode('txt', { s: sc.text }));
@@ -929,7 +934,8 @@ function scanInline(src, refs) {
     }
     // --- extended autolinks: email ---
     if (c !== CODE_SPACE && c !== CODE_TAB && c !== CODE_NL && !isWord(prevChar)) {
-      const e = matchEmailAt(src, i);
+      const allowUnder = delims.some((d) => d.ch === '_');
+      const e = matchEmailAt(src, i, allowUnder);
       if (e) {
         push(mkNode('aStart', { href: e.href, title: null, auto: true }));
         push(mkNode('txt', { s: e.text }));
@@ -1777,6 +1783,8 @@ function parseBlocks(lines, refs, endsWithNl) {
         // thematic break, HTML, blockquote, interrupting list) is never
         // a lazy continuation: the container closes instead. A marker
         // for any enclosing list is likewise a new item, not lazy text.
+        // (Fenced code does NOT absorb non-matching lines in a
+        // blockquote: the quote closes, unlike a list item.)
         if (stack[stack.length - 1].t === 'para' && !curBlank(cur)) {
           let newItem = false;
           const lm0 = listMarker(curRest(cur));
@@ -1809,6 +1817,13 @@ function parseBlocks(lines, refs, endsWithNl) {
           j++;
           continue;
         }
+        // A fenced code block absorbs lines that do not match the
+        // container (lazy code content), unless the line closes it.
+        const topI = stack[stack.length - 1];
+        if (topI.t === 'code' && topI.fenced && !curBlank(cur) && !isClosingFence(curRest(cur), topI.fence)) {
+          lazy = true;
+          break;
+        }
         if (stack[stack.length - 1].t === 'para' && !curBlank(cur)) {
           let newItem = false;
           const lm0 = listMarker(curRest(cur));
@@ -1829,6 +1844,16 @@ function parseBlocks(lines, refs, endsWithNl) {
     }
     if (lazy) {
       const top = stack[stack.length - 1];
+      if (top.t === 'code' && top.fenced) {
+        // lazy fenced-code content: strip up to the fence indent
+        let line = curRestExpanded(cur);
+        const ind = top.fence.indent || 0;
+        let k = 0;
+        while (k < line.length && k < ind && line[k] === ' ') k++;
+        top.content += line.slice(k) + '\n';
+        li++;
+        continue;
+      }
       // a lazy continuation line has 4 columns of leading indent stripped
       // (the indented-code threshold); fewer than 4 columns are kept
       if (curSpaces(cur) >= 4) curAdvance(cur, 4);
