@@ -1217,8 +1217,15 @@ function htmlBlockStart(s) {
   return null;
 }
 
-// List marker at the start of s (after up to 3 spaces): returns
-// {ordered, start, markerLen} or null. markerLen is the marker's width.
+// Do two list markers (or a marker and a list node) belong to the same
+// list? Unordered lists must share the bullet char; ordered lists must
+// share the delimiter.
+function sameListKind(a, b) {
+  if (a.ordered !== b.ordered) return false;
+  if (a.ordered) return a.delim === b.delim;
+  return a.bullet === b.bullet;
+}
+
 function listMarker(s) {
   let i = 0, spaces = 0;
   while (i < s.length && s[i] === ' ' && spaces < 3) { i++; spaces++; }
@@ -1226,7 +1233,7 @@ function listMarker(s) {
   const ch = s[i];
   if (ch === '-' || ch === '+' || ch === '*') {
     if (i + 1 < s.length && s[i + 1] !== ' ' && s[i + 1] !== '\t') return null;
-    return { ordered: false, start: 1, markerLen: 1, indent: i };
+    return { ordered: false, start: 1, markerLen: 1, indent: i, bullet: ch, delim: null };
   }
   if (ch >= '0' && ch <= '9') {
     let j = i;
@@ -1234,7 +1241,7 @@ function listMarker(s) {
     if (j - i > 9) return null;
     if (j < s.length && (s[j] === '.' || s[j] === ')')) {
       if (j + 1 < s.length && s[j + 1] !== ' ' && s[j + 1] !== '\t') return null;
-      return { ordered: true, start: parseInt(s.slice(i, j), 10), delim: s[j], markerLen: j - i + 1, indent: i };
+      return { ordered: true, start: parseInt(s.slice(i, j), 10), delim: s[j], markerLen: j - i + 1, indent: i, bullet: null };
     }
   }
   return null;
@@ -1483,6 +1490,10 @@ function parseBlocks(lines, refs) {
         b.content = b.content.replace(/\n+$/, '') + '\n';
       }
     }
+    if (b.t === 'html' && b.stripNl && b.content.endsWith('\n')) {
+      // an HTML block followed by a blank line has no trailing newline
+      b.content = b.content.slice(0, -1);
+    }
     if (b.t === 'list') b.closed = true;
   }
 
@@ -1524,8 +1535,18 @@ function parseBlocks(lines, refs) {
         curRestore(cur, snap);
         // a line that would interrupt a paragraph (setext, ATX, fence,
         // thematic break, HTML, blockquote, interrupting list) is never
-        // a lazy continuation: the container closes instead
-        if (stack[stack.length - 1].t === 'para' && !curBlank(cur) && !interruptsPara(curRest(cur))) lazy = true;
+        // a lazy continuation: the container closes instead. A marker
+        // for any enclosing list is likewise a new item, not lazy text.
+        if (stack[stack.length - 1].t === 'para' && !curBlank(cur)) {
+          let newItem = false;
+          const lm0 = listMarker(curRest(cur));
+          if (lm0) {
+            for (let k = 1; k < stack.length - 1; k++) {
+              if (stack[k].t === 'list' && sameListKind(lm0, stack[k])) { newItem = true; break; }
+            }
+          }
+          if (!newItem && !interruptsPara(curRest(cur))) lazy = true;
+        }
         break;
       }
       if (b.t === 'item') {
@@ -1534,13 +1555,26 @@ function parseBlocks(lines, refs) {
           j++;
           continue;
         }
-        if (curSpaces(cur) >= b.indent) {
+        // An empty list item that is followed by a blank line accepts no
+        // further content: an indented line after the blank line is a
+        // separate block, not part of the item.
+        const emptyAfterBlank = b.children.length === 0 && lastBlank;
+        if (curSpaces(cur) >= b.indent && !emptyAfterBlank) {
           curAdvance(cur, b.indent);
           depth = j;
           j++;
           continue;
         }
-        if (stack[stack.length - 1].t === 'para' && !curBlank(cur) && !interruptsPara(curRest(cur))) lazy = true;
+        if (stack[stack.length - 1].t === 'para' && !curBlank(cur)) {
+          let newItem = false;
+          const lm0 = listMarker(curRest(cur));
+          if (lm0) {
+            for (let k = 1; k < stack.length - 1; k++) {
+              if (stack[k].t === 'list' && sameListKind(lm0, stack[k])) { newItem = true; break; }
+            }
+          }
+          if (!newItem && !interruptsPara(curRest(cur))) lazy = true;
+        }
         break;
       }
       break;
@@ -1582,9 +1616,17 @@ function parseBlocks(lines, refs) {
           stack.pop();
           finalize(top);
         } else if (top.t === 'html') {
-          // blank line ends an HTML block
-          stack.pop();
-          finalize(top);
+          // Only HTML block types 6 and 7 end at a blank line. Types 1-5
+          // (script/pre/style/textarea/comment/processing-instruction and
+          // block tags that end at a closing tag) keep blank lines as
+          // content until their end tag.
+          if (top.type === 6 || top.type === 7) {
+            top.stripNl = true;
+            stack.pop();
+            finalize(top);
+          } else {
+            top.content += '\n';
+          }
         }
         lastBlank = true;
         done = true;
@@ -1650,8 +1692,20 @@ function parseBlocks(lines, refs) {
 
       if (top.t === 'html') {
         const line = curRest(cur);
+        // type 7 is a single complete tag: it ends after its first line,
+        // so a following line is never part of it
+        if (top.type === 7) {
+          stack.pop();
+          finalize(top);
+          continue;
+        }
         top.content += line + '\n';
         if (top.endTag && line.toLowerCase().includes(top.endTag.toLowerCase())) {
+          // the trailing newline is stripped only if the next line is a
+          // real blank line; no next line means end-of-input (keep it)
+          let strip = false;
+          if (li + 1 < lines.length && /^[ \t]*$/.test(lines[li + 1])) strip = true;
+          top.stripNl = strip;
           stack.pop();
           finalize(top);
         }
@@ -1671,8 +1725,7 @@ function parseBlocks(lines, refs) {
         while (sp < 3 && curChar(cur) === ' ') { curAdvance(cur, 1); sp++; }
         const lm2 = listMarker(curRest(cur));
         curRestore(cur, snap);
-        const sameList = lm2 && lm2.indent === 0 && lm2.ordered === top.ordered &&
-          (!lm2.ordered || lm2.delim === top.delim);
+        const sameList = lm2 && lm2.indent === 0 && sameListKind(lm2, top);
         if (!sameList) {
           stack.pop();
           finalize(top);
@@ -1754,21 +1807,20 @@ function parseBlocks(lines, refs) {
           // this item belongs to it; otherwise reuse a same-type list
           // that is the previous sibling of the current container.
           let list = null;
-          if (stack[stack.length - 1].t === 'list') {
+          if (stack[stack.length - 1].t === 'list' && sameListKind(lm, stack[stack.length - 1])) {
             list = stack[stack.length - 1];
           } else {
             const parent = stack[stack.length - 1];
             const sibs = parent.children;
             if (sibs.length > 0) {
               const last = sibs[sibs.length - 1];
-              if (last.t === 'list' && last.ordered === lm.ordered &&
-                (!lm.ordered || last.delim === lm.delim) && !last.closed) {
+              if (last.t === 'list' && sameListKind(lm, last) && !last.closed) {
                 list = last;
               }
             }
           }
           if (!list) {
-            list = { t: 'list', ordered: lm.ordered, start: lm.start, delim: lm.delim || null, tight: true, children: [], closed: false };
+            list = { t: 'list', ordered: lm.ordered, start: lm.start, delim: lm.delim || null, bullet: lm.bullet || null, tight: true, children: [], closed: false };
             addBlock(list);
           }
           const item = { t: 'item', children: [], indent: itemIndent };
@@ -1937,6 +1989,10 @@ export function parse(markdown) {
   const src = markdown.replace(/\r\n?/g, '\n');
   const refs = new Map();
   const lines = src.split('\n');
+  // A final \n produces a trailing empty string that is not a real line:
+  // treating it as a blank line wrongly strips an HTML block's trailing
+  // newline and adds a spurious \n to type 1-5 HTML / code blocks at EOF.
+  if (src.endsWith('\n') && lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   const blocks = parseBlocks(lines, refs);
   return renderBlocks(blocks, refs);
 }
