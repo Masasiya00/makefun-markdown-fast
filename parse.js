@@ -1908,6 +1908,19 @@ function parseBlocks(lines, refs, endsWithNl) {
             done = true;
             break;
           }
+          // A tab-only line does NOT end a table paragraph: it becomes
+          // an empty row (a spaces-only or truly empty line does end
+          // it). Detect a table by its first two lines (header +
+          // delimiter row).
+          if (/^\t+$/.test(curRest(cur)) && top.lines.length >= 2) {
+            const h0 = splitRow(top.lines[0]);
+            const a0 = delimiterRow(top.lines[1]);
+            if (h0.length > 0 && a0 && a0.length === h0.length) {
+              top.lines.push('');
+              done = true;
+              break;
+            }
+          }
           // a container-blank line ends the paragraph: it separates the
           // next block in the same item (cm-259), even though it is not
           // a source-blank line
