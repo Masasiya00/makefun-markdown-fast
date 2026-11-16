@@ -967,7 +967,12 @@ function processEmphasis(head, delims) {
   for (let i = 0; i < delims.length; i++) {
     delims[i].dPrev = i > 0 ? delims[i - 1] : null;
     delims[i].dNext = i + 1 < delims.length ? delims[i + 1] : null;
+    delims[i].trap = 0;
   }
+  // trap id: delimiters inside a formed emphasis are trapped in it and
+  // can only pair with delimiters trapped in the same emphasis (a `_`
+  // inside `<em>foo _bar</em>` cannot pair with a `_` outside it)
+  let trapId = 1;
   const bottom = {}; // ch -> delimiter node (do not look past it), or null
   let current = delims[0];
   while (current) {
@@ -978,7 +983,7 @@ function processEmphasis(head, delims) {
     let found = null;
     let sawOpener = false;
     while (opener && opener !== b) {
-      if (opener.ch === current.ch && opener.open) {
+      if (opener.ch === current.ch && opener.open && opener.trap === current.trap) {
         sawOpener = true;
         const odd = (opener.close || current.open) &&
           ((opener.n + current.n) % 3 === 0) &&
@@ -1008,6 +1013,11 @@ function processEmphasis(head, delims) {
         current = current.dNext;
         continue;
       }
+      // trap the delimiters inside this emphasis: they can only pair
+      // with delimiters trapped in the same emphasis, not with ones
+      // outside it
+      for (let d = found.dNext; d && d !== current; d = d.dNext) d.trap = trapId;
+      trapId++;
       // splice the em node in place of the range
       const em = mkNode('em', { tag, kids });
       const before = found.prev;
