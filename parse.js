@@ -1040,21 +1040,39 @@ function processEmphasis(head, delims) {
   // inside `<em>foo _bar</em>` cannot pair with a `_` outside it)
   let trapId = 1;
   const bottom = {}; // ch -> delimiter node (do not look past it), or null
+  const bottomUse = {}; // ch -> emphasis length that set the barrier (0 = hard stop)
   let current = delims[0];
   while (current) {
     if (!current.close) { current = current.dNext; continue; }
     // find the nearest opener of the same char, walking back
     const b = bottom[current.ch] || null;
+    // A length-aware barrier (bottomUse set) only stops closers shorter
+    // than the emphasis that set it; a hard-stop barrier (no bottomUse)
+    // stops every closer.
+    const bUse = bottomUse[current.ch] !== undefined ? bottomUse[current.ch] : Infinity;
     let opener = current.dPrev;
     let found = null;
     let sawOpener = false;
-    while (opener && opener !== b) {
+    // Did the search reach the length-aware barrier and pass its length
+    // rule? An opener at or past the barrier may only be matched by a
+    // full-length closer (d30: a `*` closer cannot partially match the
+    // `**` opener across an inner emphasis); doc-07 is stopped earlier
+    // by the length rule itself.
+    let crossed = false;
+    while (opener) {
+      if (opener === b) {
+        if (bUse === Infinity || current.n < bUse) break;
+        crossed = true; // length rule passed; b is still a candidate
+      }
       if (opener.ch === current.ch && opener.open && opener.trap === current.trap) {
         sawOpener = true;
         const odd = (opener.close || current.open) &&
           ((opener.n + current.n) % 3 === 0) &&
           (opener.n % 3 !== 0 || current.n % 3 !== 0);
-        if (!odd) { found = opener; break; }
+        if (!odd) {
+          if (crossed && current.n < opener.n) { opener = opener.dPrev; continue; }
+          found = opener; break;
+        }
       }
       opener = opener.dPrev;
     }
@@ -1109,6 +1127,16 @@ function processEmphasis(head, delims) {
       const em = mkNode('em', { tag, kids });
       const before = found.prev;
       const after = current.next;
+      // A "both" closer paired with an open-only opener (e.g. `*a
+      // **b**c*`): the inner emphasis blocks an outer emphasis of the
+      // same char from spanning across it (marked leaves the outer
+      // `*...*` literal). When the opener can also close (cm-411) or
+      // the closer cannot open (`*a **b** c*`), no barrier is set and
+      // the outer emphasis forms normally. Capture the delimiter
+      // before the opener: a later closer must not look past it.
+      const openOnly = !found.close;
+      const closerCanOpen = current.open;
+      const barrierBefore = found.dPrev;
       // opener: keep it (reduced) or remove it
       found.n -= use;
       if (found.n > 0) {
@@ -1138,13 +1166,17 @@ function processEmphasis(head, delims) {
       // A closer that still has delimiters left must be re-examined: its
       // remaining run can close another (outer) opener, e.g. the last *
       // of *** after a ** strong. Advancing past it loses that pairing.
+      // Open-only opener + both closer: set the barrier so a later
+      // closer cannot match an opener before this emphasis. The barrier
+      // only stops closers shorter than this emphasis's length (use).
+      if (openOnly && closerCanOpen) { bottom[found.ch] = barrierBefore; bottomUse[found.ch] = use; }
       current = closerLeft ? current : nextDelim;
     } else {
       // No opener for this closer. Only move the bottom marker when no
       // candidate opener was seen at all: an opener rejected by the rule
       // of 3 for THIS closer (its n differs) may still pair with a later
-      // closer, so it must stay reachable.
-      if (current.open && !sawOpener) bottom[current.ch] = current.dPrev;
+      // closer, so it must stay reachable. This is a hard-stop barrier.
+      if (current.open && !sawOpener) { bottom[current.ch] = current.dPrev; bottomUse[current.ch] = Infinity; }
       current = current.dNext;
     }
   }
