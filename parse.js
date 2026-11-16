@@ -1299,10 +1299,12 @@ function curRest(c) {
 // content: inside a container the offset is past column 0 and a leading
 // tab expands to the next tab stop; at the top level (col 0) the raw
 // line is kept (a tab in a continuation line stays a tab).
-function curRestExpanded(c) {
+// colOverride: when given, expand tabs as if the cursor were at that
+// column instead of c.col.
+function curRestExpanded(c, colOverride) {
   const rest = curRest(c);
   if (c.col === 0 && c.part === 0) return rest;
-  let col = c.col;
+  let col = colOverride !== undefined ? colOverride : c.col;
   let i = 0;
   let out = '';
   while (i < rest.length) {
@@ -1313,6 +1315,15 @@ function curRestExpanded(c) {
   }
   return out + rest.slice(i);
 }
+// In a doubly-nested blockquote (exactly 2 quote levels), marked
+// expands a leading tab as if the column were 2 less than the source
+// column (probed: n1 and n3 use the source column; only n2 shifts).
+function tabCol(c, stack) {
+  let q = 0;
+  for (const b of stack) if (b.t === 'quote') q++;
+  return q === 2 ? Math.max(0, c.col - 2) : c.col;
+}
+
 function curBlank(c) {
   for (let j = c.i; j < c.s.length; j++) {
     const ch = c.s[j];
@@ -1858,7 +1869,7 @@ function parseBlocks(lines, refs, endsWithNl) {
       const top = stack[stack.length - 1];
       if (top.t === 'code' && top.fenced) {
         // lazy fenced-code content: strip up to the fence indent
-        let line = curRestExpanded(cur);
+        let line = curRestExpanded(cur, tabCol(cur, stack));
         const ind = top.fence.indent || 0;
         let k = 0;
         while (k < line.length && k < ind && line[k] === ' ') k++;
@@ -2012,7 +2023,7 @@ function parseBlocks(lines, refs, endsWithNl) {
         }
         // content lines lose up to the opening fence's indent; a
         // leading tab expands to spaces (column-aware)
-        let line = curRestExpanded(cur);
+        let line = curRestExpanded(cur, tabCol(cur, stack));
         const ind = top.fence.indent || 0;
         let k = 0;
         while (k < line.length && k < ind && line[k] === ' ') k++;
